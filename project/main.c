@@ -117,6 +117,20 @@ static key_action_t ascii_to_hid(char c)
     {
         act.key = HID_KEY_MINUS;
     }
+    else if (c == ':')
+    {
+        act.key = HID_KEY_SEMICOLON;
+        act.modifier = KEYBOARD_MODIFIER_LEFTSHIFT;
+    }
+    else if (c == '=')
+    {
+        act.key = HID_KEY_EQUAL;
+    }
+    else if (c == '?')
+    {
+        act.key = HID_KEY_SLASH;
+        act.modifier = KEYBOARD_MODIFIER_LEFTSHIFT;
+    }
     else if (c == '_')
     {
         act.key = HID_KEY_MINUS;
@@ -196,7 +210,7 @@ void hid_task(void)
     case ST_IDLE:
         if (btn && tud_hid_ready())
         {
-            build_sequence("start https://www.youtube.com/watch?v=dQw4w9WgXcQ"); // Faster test
+            build_sequence("cmd /c start https://www.youtube.com/watch?v=dQw4w9WgXcQ"); // Faster test
             seq_index = 0;
             state = ST_SENDING;
             printf("Starting fast sequence\n");
