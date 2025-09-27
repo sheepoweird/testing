@@ -8,7 +8,7 @@
 #include "hardware/gpio.h"
 #include "hid_config.h"
 
-#define BUTTON_PIN 22
+#define BUTTON_PIN 20  
 
 // Function prototypes
 void hid_task(void);
@@ -17,21 +17,23 @@ void led_blinking_task(void);
 int main(void) {
     // Initialize the board
     board_init();
-    
+    tusb_init();
+
+    // Clear Screen
+    printf("\033[2J\033[H");
+
+    // Initialize TinyUSB
+    tud_init(BOARD_TUD_RHPORT);
+
     // Initialize the standard I/O streams
     stdio_init_all();
 
-    // Initialize TinyUSB
-    tusb_init();
-
-    // Initialize button pin
+    // Initialize button - ADD THIS MISSING PART
     gpio_init(BUTTON_PIN);
     gpio_set_dir(BUTTON_PIN, GPIO_IN);
     gpio_pull_up(BUTTON_PIN);
 
-    // Clear Screen
-    printf("\033[2J\033[H");
-    printf("HID Storage Device Ready\n");
+    printf("HID+Storage ready, button on GP%d\n", BUTTON_PIN);
 
     // Run the TinyUSB task loop
     while (true) {
@@ -42,6 +44,7 @@ int main(void) {
     return 0;
 }
 
+// Keep all your existing USB callbacks exactly the same
 //--------------------------------------------------------------------+
 
 // Invoked when device is mounted
@@ -70,10 +73,8 @@ void tud_resume_cb(void)
 }
 
 //--------------------------------------------------------------------+
-// USB HID
+// USB HID - Keep all your existing HID code
 //--------------------------------------------------------------------+
-
-static bool has_key = false;
 
 // HID keyboard task
 // Map ASCII to HID keycode + modifier
@@ -224,12 +225,14 @@ void hid_task(void)
     }
 }
 
+// Keep all your existing HID callbacks exactly the same
 // Invoked when sent REPORT successfully to host
 // Application can use this to send the next report
 // Note: For composite reports, report[0] is report ID
 void tud_hid_report_complete_cb(uint8_t instance, uint8_t const *report, uint16_t len)
 {
     (void)instance;
+    (void)report;
     (void)len;
     // Nothing to do here for this simple example
 }
