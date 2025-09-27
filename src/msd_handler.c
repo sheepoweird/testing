@@ -1,49 +1,33 @@
 #include "msd_handler.h"
-#include "ff.h"  // FatFs
-#include "diskio.h" 
+#include "tusb.h"
 
-static FATFS fs;
-static FIL file;
-static bool fs_mounted = false;
-static uint8_t ram_disk[MSD_BLOCK_SIZE * MSD_BLOCK_COUNT] __attribute__((aligned(MSD_BLOCK_SIZE)));
+#define BLOCK_SIZE 512
+#define BLOCK_COUNT 4096
 
-void msd_init(void) {
-    // Initialize RAM disk with FAT filesystem
+static uint8_t ram_disk[BLOCK_SIZE * BLOCK_COUNT] __attribute__((aligned(BLOCK_SIZE)));
+
+void msd_init() {
     memset(ram_disk, 0, sizeof(ram_disk));
-    
-    // You can pre-populate with files here if needed
+    printf("MSD Initialized with %d blocks\n", BLOCK_COUNT);
 }
 
-void msd_task(void) {
-    // Handle any periodic MSD tasks
-}
-
-bool msd_ready(void) {
-    return tud_msc_ready();
+void msd_task() {
+    // MSD periodic tasks can go here
 }
 
 // TinyUSB MSD callbacks
-bool tud_msd_scsi_cb(uint8_t lun, uint8_t const scsi_cmd[16], void* buffer, uint16_t bufsize) {
-    // Handle SCSI commands
+bool tud_msc_scsi_cb(uint8_t lun, uint8_t const scsi_cmd[16], void* buffer, uint16_t bufsize) {
     return true;
 }
 
-int32_t tud_msd_read10_cb(uint8_t lun, uint32_t lba, uint32_t offset, void* buffer, uint32_t bufsize) {
-    if (lba >= MSD_BLOCK_COUNT) return -1;
-    
-    uint32_t addr = lba * MSD_BLOCK_SIZE + offset;
-    if (addr + bufsize > sizeof(ram_disk)) return -1;
-    
-    memcpy(buffer, &ram_disk[addr], bufsize);
+int32_t tud_msc_read10_cb(uint8_t lun, uint32_t lba, uint32_t offset, void* buffer, uint32_t bufsize) {
+    if (lba >= BLOCK_COUNT) return -1;
+    memcpy(buffer, &ram_disk[lba * BLOCK_SIZE + offset], bufsize);
     return bufsize;
 }
 
-int32_t tud_msd_write10_cb(uint8_t lun, uint32_t lba, uint32_t offset, uint8_t* buffer, uint32_t bufsize) {
-    if (lba >= MSD_BLOCK_COUNT) return -1;
-    
-    uint32_t addr = lba * MSD_BLOCK_SIZE + offset;
-    if (addr + bufsize > sizeof(ram_disk)) return -1;
-    
-    memcpy(&ram_disk[addr], buffer, bufsize);
+int32_t tud_msc_write10_cb(uint8_t lun, uint32_t lba, uint32_t offset, uint8_t* buffer, uint32_t bufsize) {
+    if (lba >= BLOCK_COUNT) return -1;
+    memcpy(&ram_disk[lba * BLOCK_SIZE + offset], buffer, bufsize);
     return bufsize;
 }
