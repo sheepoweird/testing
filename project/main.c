@@ -10,29 +10,28 @@
 
 #define BUTTON_PIN 22
 
-// HID report buffer
-static uint8_t const keycode2ascii[128][2] = {HID_KEYCODE_TO_ASCII};
-
 // Function prototypes
 void hid_task(void);
 void led_blinking_task(void);
 
-
-
-
 int main(void) {
     // Initialize the board
     board_init();
+    
+    // Initialize the standard I/O streams
+    stdio_init_all();
+
+    // Initialize TinyUSB
     tusb_init();
+
+    // Initialize button pin
+    gpio_init(BUTTON_PIN);
+    gpio_set_dir(BUTTON_PIN, GPIO_IN);
+    gpio_pull_up(BUTTON_PIN);
 
     // Clear Screen
     printf("\033[2J\033[H");
-
-    // Initialize TinyUSB
-    tud_init(BOARD_TUD_RHPORT);
-
-    // Initialize the standard I/O streams
-    stdio_init_all();
+    printf("HID Storage Device Ready\n");
 
     // Run the TinyUSB task loop
     while (true) {
@@ -42,9 +41,6 @@ int main(void) {
     }
     return 0;
 }
-
-
-
 
 //--------------------------------------------------------------------+
 

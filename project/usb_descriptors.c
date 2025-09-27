@@ -24,6 +24,7 @@
  */
 
 #include "tusb.h"
+#include "hid_config.h"
 
 /* A combination of interfaces must have a unique product id, since PC will save device driver after the first plug.
  * Same VID/PID with different interface e.g MSC (first), then CDC (later) will possibly cause system error on PC.
@@ -74,6 +75,27 @@ uint8_t const * tud_descriptor_device_cb(void)
 }
 
 //--------------------------------------------------------------------+
+// HID Report Descriptor
+//--------------------------------------------------------------------+
+
+uint8_t const desc_hid_report[] =
+{
+  TUD_HID_REPORT_DESC_KEYBOARD( HID_REPORT_ID(REPORT_ID_KEYBOARD   )),
+  TUD_HID_REPORT_DESC_MOUSE   ( HID_REPORT_ID(REPORT_ID_MOUSE      )),
+  TUD_HID_REPORT_DESC_CONSUMER( HID_REPORT_ID(REPORT_ID_CONSUMER_CONTROL)),
+  TUD_HID_REPORT_DESC_GAMEPAD ( HID_REPORT_ID(REPORT_ID_GAMEPAD    ))
+};
+
+// Invoked when received GET HID REPORT DESCRIPTOR
+// Application return pointer to descriptor
+// Descriptor contents must exist long enough for transfer to complete
+uint8_t const * tud_hid_descriptor_report_cb(uint8_t instance)
+{
+  (void) instance;
+  return desc_hid_report;
+}
+
+//--------------------------------------------------------------------+
 // Configuration Descriptor
 //--------------------------------------------------------------------+
 
@@ -82,6 +104,7 @@ enum
   ITF_NUM_CDC = 0,
   ITF_NUM_CDC_DATA,
   ITF_NUM_MSC,
+  ITF_NUM_HID,
   ITF_NUM_TOTAL
 };
 
@@ -94,6 +117,8 @@ enum
 
   #define EPNUM_MSC_OUT     0x05
   #define EPNUM_MSC_IN      0x85
+  
+  #define EPNUM_HID   0x84
 
 #elif CFG_TUSB_MCU == OPT_MCU_SAMG  || CFG_TUSB_MCU ==  OPT_MCU_SAMX7X
   // SAMG & SAME70 don't support a same endpoint number with different direction IN and OUT
@@ -104,6 +129,8 @@ enum
 
   #define EPNUM_MSC_OUT     0x04
   #define EPNUM_MSC_IN      0x85
+
+  #define EPNUM_HID   0x86
 
 #elif CFG_TUSB_MCU == OPT_MCU_CXD56
   // CXD56 doesn't support a same endpoint number with different direction IN and OUT
@@ -116,6 +143,8 @@ enum
 
   #define EPNUM_MSC_OUT     0x05
   #define EPNUM_MSC_IN      0x84
+  
+  #define EPNUM_HID   0x86
 
 #elif CFG_TUSB_MCU == OPT_MCU_FT90X || CFG_TUSB_MCU == OPT_MCU_FT93X
   // FT9XX doesn't support a same endpoint number with different direction IN and OUT
@@ -127,6 +156,8 @@ enum
   #define EPNUM_MSC_OUT     0x04
   #define EPNUM_MSC_IN      0x85
 
+  #define EPNUM_HID   0x86
+
 #else
   #define EPNUM_CDC_NOTIF   0x81
   #define EPNUM_CDC_OUT     0x02
@@ -135,9 +166,11 @@ enum
   #define EPNUM_MSC_OUT     0x03
   #define EPNUM_MSC_IN      0x83
 
+  #define EPNUM_HID   0x84
+
 #endif
 
-#define CONFIG_TOTAL_LEN    (TUD_CONFIG_DESC_LEN + TUD_CDC_DESC_LEN + TUD_MSC_DESC_LEN)
+#define CONFIG_TOTAL_LEN    (TUD_CONFIG_DESC_LEN + TUD_CDC_DESC_LEN + TUD_MSC_DESC_LEN + TUD_HID_DESC_LEN)
 
 // full speed configuration
 uint8_t const desc_fs_configuration[] =
@@ -150,6 +183,9 @@ uint8_t const desc_fs_configuration[] =
 
   // Interface number, string index, EP Out & EP In address, EP size
   TUD_MSC_DESCRIPTOR(ITF_NUM_MSC, 5, EPNUM_MSC_OUT, EPNUM_MSC_IN, 64),
+
+  // Interface number, string index, protocol, report descriptor len, EP In address, size & polling interval
+  TUD_HID_DESCRIPTOR(ITF_NUM_HID, 6, HID_ITF_PROTOCOL_NONE, sizeof(desc_hid_report), EPNUM_HID, CFG_TUD_HID_EP_BUFSIZE, 10)
 };
 
 #if TUD_OPT_HIGH_SPEED
@@ -166,6 +202,9 @@ uint8_t const desc_hs_configuration[] =
 
   // Interface number, string index, EP Out & EP In address, EP size
   TUD_MSC_DESCRIPTOR(ITF_NUM_MSC, 5, EPNUM_MSC_OUT, EPNUM_MSC_IN, 512),
+
+  // Interface number, string index, protocol, report descriptor len, EP In address, size & polling interval
+  TUD_HID_DESCRIPTOR(ITF_NUM_HID, 6, HID_ITF_PROTOCOL_NONE, sizeof(desc_hid_report), EPNUM_HID, CFG_TUD_HID_EP_BUFSIZE, 10)
 };
 
 // other speed configuration
@@ -245,6 +284,7 @@ char const* string_desc_arr [] =
   "123456789012",                // 3: Serials, should use chip ID
   "TinyUSB CDC",                 // 4: CDC Interface
   "TinyUSB MSC",                 // 5: MSC Interface
+  "TinyUSB HID",                 // 6: HID Interface
 };
 
 static uint16_t _desc_str[32];

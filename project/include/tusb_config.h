@@ -37,6 +37,10 @@
 #define CFG_TUD_MSC             (1)
 #define CFG_TUD_MSC_EP_BUFSIZE  (4096)
 
+// Add HID support
+#define CFG_TUD_HID             (1)
+#define CFG_TUD_HID_EP_BUFSIZE  (16)
+
 // We use a vendor specific interface but with our own driver
 // Vendor driver only used for Microsoft OS 2.0 descriptor
 #if !PICO_STDIO_USB_RESET_INTERFACE_SUPPORT_MS_OS_20_DESCRIPTOR
