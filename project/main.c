@@ -1,8 +1,11 @@
-#include <bsp/board.h>
 #include <pico/stdlib.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
+
+#include <bsp/board.h>
 #include <tusb.h>
+#include "hardware/gpio.h"
 
 
 int main(void) {
