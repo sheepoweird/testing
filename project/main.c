@@ -136,7 +136,7 @@ static key_action_t ascii_to_hid(char c)
 static key_action_t sequence[MAX_SEQ];
 static int seq_len = 0;
 
-// Build sequence for Win+R, "string", Enter
+// Faster sequence building - send multiple keys at once
 static void build_sequence(const char *str)
 {
     seq_len = 0;
@@ -144,27 +144,36 @@ static void build_sequence(const char *str)
     // Win+R
     sequence[seq_len++] = (key_action_t){KEYBOARD_MODIFIER_LEFTGUI, HID_KEY_R};
     sequence[seq_len++] = (key_action_t){0, 0}; // release
+    
+    // Small delay
+    sequence[seq_len++] = (key_action_t){0, 0}; 
+    sequence[seq_len++] = (key_action_t){0, 0}; 
 
-    // String chars
-    for (const char *p = str; *p && seq_len < MAX_SEQ - 2; p++)
+    // Send characters in chunks
+    for (const char *p = str; *p && seq_len < MAX_SEQ - 4; p++)
     {
         key_action_t k = ascii_to_hid(*p);
         if (k.key)
         {
             sequence[seq_len++] = k;
-            sequence[seq_len++] = (key_action_t){0, 0}; // release
+            // Only add release every few characters or for special keys
+            if (k.modifier || (seq_len % 3 == 0)) {
+                sequence[seq_len++] = (key_action_t){0, 0}; // release
+            }
         }
     }
 
-    // Enter
+    // Final release and Enter
+    sequence[seq_len++] = (key_action_t){0, 0}; // final release
+    sequence[seq_len++] = (key_action_t){0, 0}; // delay
     sequence[seq_len++] = (key_action_t){0, HID_KEY_ENTER};
     sequence[seq_len++] = (key_action_t){0, 0}; // release
 }
 
-// HID task
+// Much faster HID task
 void hid_task(void)
 {
-    const uint32_t interval_ms = 50;
+    const uint32_t interval_ms = 20; // Much faster - 20ms instead of 50ms
     static uint32_t start_ms = 0;
 
     enum
@@ -185,30 +194,45 @@ void hid_task(void)
     switch (state)
     {
     case ST_IDLE:
-        if (btn)
+        if (btn && tud_hid_ready())
         {
-            build_sequence("powershell -Command Start-Process calc.exe"); // <-- change string here
+            build_sequence("start https://www.youtube.com/watch?v=dQw4w9WgXcQ"); // Faster test
             seq_index = 0;
             state = ST_SENDING;
-            printf("Starting sequence\n");
+            printf("Starting fast sequence\n");
         }
         break;
 
     case ST_SENDING:
-        if (seq_index < seq_len)
+        if (tud_hid_ready() && seq_index < seq_len)
         {
             key_action_t act = sequence[seq_index++];
-            if (act.key)
+            
+            if (act.key || act.modifier)
             {
+                // Send up to 6 keys at once
                 uint8_t kc[6] = {act.key};
+                
+                // Try to pack more keys in one report (look ahead)
+                int pack_count = 1;
+                while (pack_count < 6 && seq_index < seq_len && 
+                       sequence[seq_index].key && !sequence[seq_index].modifier &&
+                       sequence[seq_index].modifier == act.modifier)
+                {
+                    kc[pack_count] = sequence[seq_index].key;
+                    pack_count++;
+                    seq_index++;
+                }
+                
                 tud_hid_keyboard_report(REPORT_ID_KEYBOARD, act.modifier, kc);
+                printf("Sent %d keys\n", pack_count);
             }
             else
             {
                 tud_hid_keyboard_report(REPORT_ID_KEYBOARD, 0, NULL);
             }
         }
-        else
+        else if (seq_index >= seq_len)
         {
             state = ST_DONE;
         }
