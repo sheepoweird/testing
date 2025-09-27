@@ -18,7 +18,7 @@ set(PICO_SDK_PATH "C:/Users/piers/pico-sdk")
 
 set(PICO_BOARD pico CACHE STRING "Board type")
 
-set(PROGRAM_NAME sd-usb)
+set(PROGRAM_NAME HID_Storage)
 
 # Pull in Pico SDK (must be before project)
 include(pico_sdk_import.cmake)
@@ -27,7 +27,7 @@ project(${PROGRAM_NAME})
 
 pico_sdk_init()
 
-add_subdirectory(../../src build)
+add_subdirectory(../src build)
 
 add_executable(${PROGRAM_NAME}
   hw_config.c

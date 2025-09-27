@@ -49,8 +49,8 @@ CMAKE_ASM_FLAGS_RELWITHDEBINFO:STRING=-O2 -g -DNDEBUG
 //No help, variable specified on the command line.
 CMAKE_BUILD_TYPE:STRING=Debug
 
-//No help, variable specified on the command line.
-CMAKE_CXX_COMPILER:FILEPATH=C:/Program Files/Raspberry Pi/Pico SDK v1.5.1/gcc-arm-none-eabi/bin/arm-none-eabi-g++.exe
+//CXX compiler
+CMAKE_CXX_COMPILER:STRING=C:/Program Files/Raspberry Pi/Pico SDK v1.5.1/gcc-arm-none-eabi/bin/arm-none-eabi-g++.exe
 
 //A wrapper around 'ar' adding the appropriate '--plugin' option
 // for the GCC compiler
@@ -75,8 +75,8 @@ CMAKE_CXX_FLAGS_RELEASE:STRING=-g -O3 -DNDEBUG
 //Flags used by the CXX compiler during RELWITHDEBINFO builds.
 CMAKE_CXX_FLAGS_RELWITHDEBINFO:STRING=-O2 -g -DNDEBUG
 
-//No help, variable specified on the command line.
-CMAKE_C_COMPILER:FILEPATH=C:/Program Files/Raspberry Pi/Pico SDK v1.5.1/gcc-arm-none-eabi/bin/arm-none-eabi-gcc.exe
+//C compiler
+CMAKE_C_COMPILER:STRING=C:/Program Files/Raspberry Pi/Pico SDK v1.5.1/gcc-arm-none-eabi/bin/arm-none-eabi-gcc.exe
 
 //A wrapper around 'ar' adding the appropriate '--plugin' option
 // for the GCC compiler
@@ -126,7 +126,7 @@ CMAKE_EXPORT_COMPILE_COMMANDS:BOOL=TRUE
 CMAKE_FIND_PACKAGE_REDIRECTS_DIR:STATIC=C:/Users/piers/Documents/Pico-v1.5.1/testing/build/CMakeFiles/pkgRedirects
 
 //Install path prefix, prepended onto install directories.
-CMAKE_INSTALL_PREFIX:PATH=C:/Program Files (x86)/sd-usb
+CMAKE_INSTALL_PREFIX:PATH=C:/Program Files (x86)/HID_Storage
 
 //Path to a program.
 CMAKE_LINKER:FILEPATH=C:/Program Files/Raspberry Pi/Pico SDK v1.5.1/gcc-arm-none-eabi/bin/arm-none-eabi-ld.exe
@@ -168,7 +168,7 @@ CMAKE_PROJECT_DESCRIPTION:STATIC=
 CMAKE_PROJECT_HOMEPAGE_URL:STATIC=
 
 //Value Computed by CMake
-CMAKE_PROJECT_NAME:STATIC=sd-usb
+CMAKE_PROJECT_NAME:STATIC=HID_Storage
 
 //Path to a program.
 CMAKE_RANLIB:FILEPATH=C:/Program Files/Raspberry Pi/Pico SDK v1.5.1/gcc-arm-none-eabi/bin/arm-none-eabi-ranlib.exe
@@ -257,6 +257,15 @@ FETCHCONTENT_UPDATES_DISCONNECTED:BOOL=OFF
 //Git command line client
 GIT_EXECUTABLE:FILEPATH=C:/Program Files/Raspberry Pi/Pico SDK v1.5.1/git/cmd/git.exe
 
+//Value Computed by CMake
+HID_Storage_BINARY_DIR:STATIC=C:/Users/piers/Documents/Pico-v1.5.1/testing/build
+
+//Value Computed by CMake
+HID_Storage_IS_TOP_LEVEL:STATIC=ON
+
+//Value Computed by CMake
+HID_Storage_SOURCE_DIR:STATIC=C:/Users/piers/Documents/Pico-v1.5.1/testing/project
+
 //PICO target board (e.g. pico, pico2)
 PICO_BOARD:STRING=pico
 
@@ -340,15 +349,6 @@ picotool_INSTALL_DIR:PATH=C:/Users/piers/Documents/Pico-v1.5.1/testing/build/_de
 
 //The directory containing a CMake configuration file for pioasm.
 pioasm_DIR:PATH=pioasm_DIR-NOTFOUND
-
-//Value Computed by CMake
-sd-usb_BINARY_DIR:STATIC=C:/Users/piers/Documents/Pico-v1.5.1/testing/build
-
-//Value Computed by CMake
-sd-usb_IS_TOP_LEVEL:STATIC=ON
-
-//Value Computed by CMake
-sd-usb_SOURCE_DIR:STATIC=C:/Users/piers/Documents/Pico-v1.5.1/testing
 
 
 ########################
@@ -450,7 +450,7 @@ CMAKE_GENERATOR_PLATFORM:INTERNAL=
 CMAKE_GENERATOR_TOOLSET:INTERNAL=
 //Source directory with the top level CMakeLists.txt file for this
 // project
-CMAKE_HOME_DIRECTORY:INTERNAL=C:/Users/piers/Documents/Pico-v1.5.1/testing
+CMAKE_HOME_DIRECTORY:INTERNAL=C:/Users/piers/Documents/Pico-v1.5.1/testing/project
 //ADVANCED property for variable: CMAKE_LINKER
 CMAKE_LINKER-ADVANCED:INTERNAL=1
 //ADVANCED property for variable: CMAKE_MAKE_PROGRAM
@@ -468,7 +468,7 @@ CMAKE_MODULE_LINKER_FLAGS_RELWITHDEBINFO-ADVANCED:INTERNAL=1
 //ADVANCED property for variable: CMAKE_NM
 CMAKE_NM-ADVANCED:INTERNAL=1
 //number of local generators
-CMAKE_NUMBER_OF_MAKEFILES:INTERNAL=98
+CMAKE_NUMBER_OF_MAKEFILES:INTERNAL=99
 //ADVANCED property for variable: CMAKE_OBJCOPY
 CMAKE_OBJCOPY-ADVANCED:INTERNAL=1
 //ADVANCED property for variable: CMAKE_OBJDUMP
@@ -554,8 +554,6 @@ _Python3_EXECUTABLE:INTERNAL=C:/Users/piers/AppData/Local/Programs/Python/Python
 //Python3 Properties
 _Python3_INTERPRETER_PROPERTIES:INTERNAL=Python;3;12;7;32;;;C:\Users\piers\AppData\Local\Programs\Python\Python312\Lib;C:\Users\piers\AppData\Local\Programs\Python\Python312\Lib;C:\Users\piers\AppData\Local\Programs\Python\Python312\Lib\site-packages;C:\Users\piers\AppData\Local\Programs\Python\Python312\Lib\site-packages
 _Python3_INTERPRETER_SIGNATURE:INTERNAL=abf89c02fe76918035831cca58cc3bdb
-//Interpreter reason failure
-_Python3_Interpreter_REASON_FAILURE:INTERNAL=
 //NumPy reason failure
 _Python3_NumPy_REASON_FAILURE:INTERNAL=
 
