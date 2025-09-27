@@ -1,46 +1,73 @@
-cmake_minimum_required(VERSION 3.13)
+# == DO NEVER EDIT THE NEXT LINES for Raspberry Pi Pico VS Code Extension to work ==
+if(WIN32)
+    set(USERHOME $ENV{USERPROFILE})
+else()
+    set(USERHOME $ENV{HOME})
+endif()
+set(sdkVersion 2.0.0)
+set(toolchainVersion 13_2_Rel1)
+set(picotoolVersion 2.0.0)
+set(picoVscode ${USERHOME}/.pico-sdk/cmake/pico-vscode.cmake)
+if (EXISTS ${picoVscode})
+    include(${picoVscode})
+endif()
+# ====================================================================================
+cmake_minimum_required(VERSION 3.13...3.27)
 
-# Set PICO_SDK_PATH before including the import
-set(PICO_SDK_PATH "C:/Program Files/Raspberry Pi/Pico SDK v1.5.1/pico-sdk")
+set(PICO_SDK_PATH "C:/Users/piers/pico-sdk")
 
-# Import Pico SDK
+set(PICO_BOARD pico CACHE STRING "Board type")
+
+set(PROGRAM_NAME sd-usb)
+
+# Pull in Pico SDK (must be before project)
 include(pico_sdk_import.cmake)
 
-# Initialize the SDK
+project(${PROGRAM_NAME})
+
 pico_sdk_init()
 
-# Initialize project AFTER pico_sdk_init()
-project(combined_usb_project C CXX ASM)
+add_subdirectory(../../src build)
 
-# Create executable
-add_executable(combined_usb_project
-    src/main.c
-    src/hid_test.c
-    src/msd_handler.c
+add_executable(${PROGRAM_NAME}
+  hw_config.c
+  main.c
+  msc_disk.c
+  usb_descriptors.c
 )
-
-# Enable USB stdio
-pico_enable_stdio_usb(combined_usb_project 1)
-pico_enable_stdio_uart(combined_usb_project 0)
-
-# Add extra outputs
-pico_add_extra_outputs(combined_usb_project)
-
-# Link libraries
-target_link_libraries(combined_usb_project 
+target_link_libraries(${PROGRAM_NAME} PRIVATE
+    no-OS-FatFS-SD-SDIO-SPI-RPi-Pico
     pico_stdlib
-    pico_multicore
-    hardware_pio
-    hardware_dma
-    hardware_flash
+    tinyusb_additions
+    tinyusb_board
+    tinyusb_device
 )
 
-# Include directories
-target_include_directories(combined_usb_project PRIVATE src)
-
-# TinyUSB configuration
-target_compile_definitions(combined_usb_project PRIVATE
-    CFG_TUD_MSC=1
-    CFG_TUD_HID=1
-    PICO_FLASH_SIZE_BYTES=2097152
+target_include_directories(${PROGRAM_NAME} PRIVATE
+  ${CMAKE_CURRENT_LIST_DIR}/include
 )
+
+# https://datasheets.raspberrypi.com/pico/raspberry-pi-pico-c-sdk.pdf
+target_compile_definitions(${PROGRAM_NAME} PUBLIC
+    PARAM_ASSERTIONS_ENABLE_ALL=1 
+    PICO_MALLOC_PANIC=1
+    PICO_USE_STACK_GUARDS=1
+    SD_USE_SPI=1
+
+    USE_PRINTF
+    USE_DBG_PRINTF
+)
+
+#target_compile_options(${PROGRAM_NAME} PRIVATE -Werror -Wall -Wextra -Wnull-dereference)
+target_compile_options(${PROGRAM_NAME} PUBLIC 
+    -Wall 
+    -Wextra 
+    -Wshadow 
+    -Wstack-usage=2048 
+    -fanalyzer 
+)
+
+target_link_options(${PROGRAM_NAME} PRIVATE -Wl,--print-memory-usage)
+
+pico_enable_stdio_usb(${PROGRAM_NAME} 1)
+pico_add_extra_outputs(${PROGRAM_NAME})

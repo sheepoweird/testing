@@ -1,9 +1,0 @@
-{
-    "files.associations": {
-        "*.embeddedhtml": "html",
-        "stdbool.h": "c",
-        "rp2040.h": "c",
-        "time.h": "c",
-        "stdio.h": "c"
-    }
-}
