@@ -1,4 +1,4 @@
-*/build
+**/build/
 **/cppcheck_project-cppcheck-build-dir
 *.html
 *.png
