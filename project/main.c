@@ -8,11 +8,38 @@
 #include "hardware/gpio.h"
 #include "hid_config.h"
 
+#include "pico/unique_id.h"
+
 #define BUTTON_PIN 20
+#define LED_PIN 7
+
+// Buffer for receiving data
+#define RX_BUFFER_SIZE 512
+char rx_buffer[RX_BUFFER_SIZE];
+int rx_index = 0;
+
+// Health data structure
+typedef struct {
+    float cpu;
+    float memory;
+    float disk;
+    float cpu_temp;
+    float net_in;
+    float net_out;
+    int processes;
+    uint32_t timestamp;
+    bool valid;
+} health_data_t;
+
+health_data_t current_health = {0};
+uint32_t last_data_time = 0;
+uint32_t sample_count = 0;
 
 // Function prototypes
 void hid_task(void);
 void led_blinking_task(void);
+void process_json_data(char* json);
+void display_compact_status(void);
 
 int main(void)
 {
@@ -22,18 +49,51 @@ int main(void)
     tud_init(BOARD_TUD_RHPORT);
     stdio_init_all();
 
+    // Buttons
     gpio_init(BUTTON_PIN);
     gpio_set_dir(BUTTON_PIN, GPIO_IN);
     gpio_pull_up(BUTTON_PIN);
+    
+    // Pins
+    gpio_init(LED_PIN);
+    gpio_set_dir(LED_PIN, GPIO_OUT);
 
     printf("HID+Storage ready, button on GP%d\n", BUTTON_PIN);
 
+    
     while (true)
     {
         tud_task();
-        led_blinking_task();
+        // led_blinking_task();
         hid_task();
+
+        // Check for incoming character
+        int c = getchar_timeout_us(0);
+        
+        if(c != PICO_ERROR_TIMEOUT) {
+            if(c == '\r' || c == '\n') {
+                // End of line
+                rx_buffer[rx_index] = '\0';
+                
+                if(rx_index > 0) {
+                    // Only process JSON data (starts with '{')
+                    if(rx_buffer[0] == '{') {
+                        process_json_data(rx_buffer);
+                    }
+                }
+                
+                // Reset buffer
+                rx_index = 0;
+            }
+            else if(rx_index < RX_BUFFER_SIZE - 1) {
+                // Add to buffer
+                rx_buffer[rx_index++] = c;
+            }
+        }
+        
+        tight_loop_contents();
     }
+
     return 0;
 }
 
@@ -43,7 +103,7 @@ void tud_suspend_cb(bool remote_wakeup_en) { (void)remote_wakeup_en; }
 void tud_resume_cb(void) { printf("USB resumed\n"); }
 
 //--------------------------------------------------------------------+
-// USB HID
+// USB HID - FASTER TYPING
 //--------------------------------------------------------------------+
 
 typedef struct
@@ -56,181 +116,82 @@ typedef struct
 static key_action_t sequence[MAX_SEQ];
 static int seq_len = 0;
 
+// Helper to add key with minimal delays
+static inline void add_key(uint8_t mod, uint8_t key, int delay_count) {
+    if (seq_len < MAX_SEQ - 2) {
+        sequence[seq_len++] = (key_action_t){mod, key};
+        sequence[seq_len++] = (key_action_t){0, 0}; // release
+        // Minimal delays between keys
+        for (int i = 0; i < delay_count; i++) {
+            if (seq_len < MAX_SEQ) sequence[seq_len++] = (key_action_t){0, 0};
+        }
+    }
+}
+
 static void build_sequence(void)
 {
     seq_len = 0;
 
     // Win+R
-    sequence[seq_len++] = (key_action_t){KEYBOARD_MODIFIER_LEFTGUI, HID_KEY_R};
-    sequence[seq_len++] = (key_action_t){0, 0};
+    add_key(KEYBOARD_MODIFIER_LEFTGUI, HID_KEY_R, 8);
 
-    // Wait longer for Run dialog
-    for (int i = 0; i < 15; i++)
-    {
-        sequence[seq_len++] = (key_action_t){0, 0};
-    }
+    // Type: cmd (faster, less delays)
+    add_key(0, HID_KEY_C, 1);
+    add_key(0, HID_KEY_M, 1);
+    add_key(0, HID_KEY_D, 1);
 
-    // Type: cmd
-    sequence[seq_len++] = (key_action_t){0, HID_KEY_C};
-    sequence[seq_len++] = (key_action_t){0, 0};
-    for (int i = 0; i < 2; i++)
-        sequence[seq_len++] = (key_action_t){0, 0};
+    // Enter
+    add_key(0, HID_KEY_ENTER, 25); // Increased delay for CMD to fully open
 
-    sequence[seq_len++] = (key_action_t){0, HID_KEY_M};
-    sequence[seq_len++] = (key_action_t){0, 0};
-    for (int i = 0; i < 2; i++)
-        sequence[seq_len++] = (key_action_t){0, 0};
-
-    sequence[seq_len++] = (key_action_t){0, HID_KEY_D};
-    sequence[seq_len++] = (key_action_t){0, 0};
-    for (int i = 0; i < 2; i++)
-        sequence[seq_len++] = (key_action_t){0, 0};
-
-    // Press Enter
-    sequence[seq_len++] = (key_action_t){0, HID_KEY_ENTER};
-    sequence[seq_len++] = (key_action_t){0, 0};
-
-    // Wait for CMD to open
-    for (int i = 0; i < 25; i++)
-    {
-        sequence[seq_len++] = (key_action_t){0, 0};
-    }
-
-    // Try drives D, E, F, G only
+    // Try drives D, E, F, G
     char drives[] = "DEFG";
     for (int d = 0; d < 4; d++)
     {
-        // Drive letter
-        sequence[seq_len++] = (key_action_t){KEYBOARD_MODIFIER_LEFTSHIFT, HID_KEY_A + (drives[d] - 'A')};
-        sequence[seq_len++] = (key_action_t){0, 0};
-        for (int i = 0; i < 3; i++)
-            sequence[seq_len++] = (key_action_t){0, 0};
+        // Drive letter (uppercase)
+        add_key(KEYBOARD_MODIFIER_LEFTSHIFT, HID_KEY_A + (drives[d] - 'A'), 1);
+        
+        // Colon
+        add_key(KEYBOARD_MODIFIER_LEFTSHIFT, HID_KEY_SEMICOLON, 1);
+        
+        // Backslash
+        add_key(0, HID_KEY_BACKSLASH, 1);
+        
+        // Type: health_cdc.exe (faster)
+        add_key(0, HID_KEY_H, 0);
+        add_key(0, HID_KEY_E, 0);
+        add_key(0, HID_KEY_A, 0);
+        add_key(0, HID_KEY_L, 0);
+        add_key(0, HID_KEY_T, 0);
+        add_key(0, HID_KEY_H, 0);
+        add_key(KEYBOARD_MODIFIER_LEFTSHIFT, HID_KEY_MINUS, 0);
+        add_key(0, HID_KEY_C, 0);
+        add_key(0, HID_KEY_D, 0);
+        add_key(0, HID_KEY_C, 0);
+        add_key(0, HID_KEY_PERIOD, 0);
+        add_key(0, HID_KEY_E, 0);
+        add_key(0, HID_KEY_X, 0);
+        add_key(0, HID_KEY_E, 1);
 
-        // Colon :
-        sequence[seq_len++] = (key_action_t){KEYBOARD_MODIFIER_LEFTSHIFT, HID_KEY_SEMICOLON};
-        sequence[seq_len++] = (key_action_t){0, 0};
-        for (int i = 0; i < 3; i++)
-            sequence[seq_len++] = (key_action_t){0, 0};
-
-        // Backslash (using forward slash to avoid multi-line comment warning)
-        sequence[seq_len++] = (key_action_t){0, HID_KEY_BACKSLASH};
-        sequence[seq_len++] = (key_action_t){0, 0};
-        for (int i = 0; i < 3; i++)
-            sequence[seq_len++] = (key_action_t){0, 0};
-
-        // h
-        sequence[seq_len++] = (key_action_t){0, HID_KEY_H};
-        sequence[seq_len++] = (key_action_t){0, 0};
-        for (int i = 0; i < 2; i++)
-            sequence[seq_len++] = (key_action_t){0, 0};
-        // e
-        sequence[seq_len++] = (key_action_t){0, HID_KEY_E};
-        sequence[seq_len++] = (key_action_t){0, 0};
-        for (int i = 0; i < 2; i++)
-            sequence[seq_len++] = (key_action_t){0, 0};
-        // a
-        sequence[seq_len++] = (key_action_t){0, HID_KEY_A};
-        sequence[seq_len++] = (key_action_t){0, 0};
-        for (int i = 0; i < 2; i++)
-            sequence[seq_len++] = (key_action_t){0, 0};
-        // l
-        sequence[seq_len++] = (key_action_t){0, HID_KEY_L};
-        sequence[seq_len++] = (key_action_t){0, 0};
-        for (int i = 0; i < 2; i++)
-            sequence[seq_len++] = (key_action_t){0, 0};
-        // t
-        sequence[seq_len++] = (key_action_t){0, HID_KEY_T};
-        sequence[seq_len++] = (key_action_t){0, 0};
-        for (int i = 0; i < 2; i++)
-            sequence[seq_len++] = (key_action_t){0, 0};
-        // h
-        sequence[seq_len++] = (key_action_t){0, HID_KEY_H};
-        sequence[seq_len++] = (key_action_t){0, 0};
-        for (int i = 0; i < 2; i++)
-            sequence[seq_len++] = (key_action_t){0, 0};
-        // _
-        sequence[seq_len++] = (key_action_t){KEYBOARD_MODIFIER_LEFTSHIFT, HID_KEY_MINUS};
-        sequence[seq_len++] = (key_action_t){0, 0};
-        for (int i = 0; i < 2; i++)
-            sequence[seq_len++] = (key_action_t){0, 0};
-        // t
-        sequence[seq_len++] = (key_action_t){0, HID_KEY_T};
-        sequence[seq_len++] = (key_action_t){0, 0};
-        for (int i = 0; i < 2; i++)
-            sequence[seq_len++] = (key_action_t){0, 0};
-        // e
-        sequence[seq_len++] = (key_action_t){0, HID_KEY_E};
-        sequence[seq_len++] = (key_action_t){0, 0};
-        for (int i = 0; i < 2; i++)
-            sequence[seq_len++] = (key_action_t){0, 0};
-        // s
-        sequence[seq_len++] = (key_action_t){0, HID_KEY_S};
-        sequence[seq_len++] = (key_action_t){0, 0};
-        for (int i = 0; i < 2; i++)
-            sequence[seq_len++] = (key_action_t){0, 0};
-        // t
-        sequence[seq_len++] = (key_action_t){0, HID_KEY_T};
-        sequence[seq_len++] = (key_action_t){0, 0};
-        for (int i = 0; i < 2; i++)
-            sequence[seq_len++] = (key_action_t){0, 0};
-        // .
-        sequence[seq_len++] = (key_action_t){0, HID_KEY_PERIOD};
-        sequence[seq_len++] = (key_action_t){0, 0};
-        for (int i = 0; i < 2; i++)
-            sequence[seq_len++] = (key_action_t){0, 0};
-        // e
-        sequence[seq_len++] = (key_action_t){0, HID_KEY_E};
-        sequence[seq_len++] = (key_action_t){0, 0};
-        for (int i = 0; i < 2; i++)
-            sequence[seq_len++] = (key_action_t){0, 0};
-        // x
-        sequence[seq_len++] = (key_action_t){0, HID_KEY_X};
-        sequence[seq_len++] = (key_action_t){0, 0};
-        for (int i = 0; i < 2; i++)
-            sequence[seq_len++] = (key_action_t){0, 0};
-        // e
-        sequence[seq_len++] = (key_action_t){0, HID_KEY_E};
-        sequence[seq_len++] = (key_action_t){0, 0};
-        for (int i = 0; i < 2; i++)
-            sequence[seq_len++] = (key_action_t){0, 0};
-
-        // Enter
-        sequence[seq_len++] = (key_action_t){0, HID_KEY_ENTER};
-        sequence[seq_len++] = (key_action_t){0, 0};
-
-        // Wait between attempts
-        for (int i = 0; i < 5; i++)
-        {
-            sequence[seq_len++] = (key_action_t){0, 0};
-        }
+        // Enter and short wait
+        add_key(0, HID_KEY_ENTER, 3);
     }
 
-    // Wait for program to open
-    for (int i = 0; i < 30; i++)
-    {
-        sequence[seq_len++] = (key_action_t){0, 0};
+    // Wait for program
+    for (int i = 0; i < 15; i++) {
+        if (seq_len < MAX_SEQ) sequence[seq_len++] = (key_action_t){0, 0};
     }
 
-    // Complete UAC - Tab Tab Enter
-    sequence[seq_len++] = (key_action_t){0, HID_KEY_TAB};
-    sequence[seq_len++] = (key_action_t){0, 0};
-    for (int i = 0; i < 8; i++)
-        sequence[seq_len++] = (key_action_t){0, 0};
-
-    sequence[seq_len++] = (key_action_t){0, HID_KEY_TAB};
-    sequence[seq_len++] = (key_action_t){0, 0};
-    for (int i = 0; i < 8; i++)
-        sequence[seq_len++] = (key_action_t){0, 0};
-
-    sequence[seq_len++] = (key_action_t){0, HID_KEY_ENTER};
-    sequence[seq_len++] = (key_action_t){0, 0};
+    // UAC - Tab Tab Enter
+    add_key(0, HID_KEY_TAB, 4);
+    add_key(0, HID_KEY_TAB, 4);
+    add_key(0, HID_KEY_ENTER, 0);
 
     printf("Sequence built: %d keys\n", seq_len);
 }
 
 void hid_task(void)
 {
-    const uint32_t interval_ms = 25;
+    const uint32_t interval_ms = 20; // Faster - 20ms instead of 25ms
     static uint32_t start_ms = 0;
 
     enum
@@ -266,7 +227,20 @@ void hid_task(void)
 
             if (act.key || act.modifier)
             {
+                // Pack multiple keys when possible (look ahead for non-modifier keys)
                 uint8_t kc[6] = {act.key, 0, 0, 0, 0, 0};
+                int pack_count = 1;
+                
+                // Try to pack more keys (same modifier, look ahead)
+                while (pack_count < 6 && seq_index < seq_len && 
+                       sequence[seq_index].key && 
+                       sequence[seq_index].modifier == act.modifier)
+                {
+                    kc[pack_count] = sequence[seq_index].key;
+                    pack_count++;
+                    seq_index++;
+                }
+                
                 tud_hid_keyboard_report(REPORT_ID_KEYBOARD, act.modifier, kc);
             }
             else
@@ -315,16 +289,64 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_
     (void)bufsize;
 }
 
+// Simple JSON parser for our specific format
+void process_json_data(char* json) {
+    health_data_t new_data = {0};
+    
+    // Very simple JSON parsing
+    char* cpu_ptr = strstr(json, "\"cpu\":");
+    char* mem_ptr = strstr(json, "\"memory\":");
+    char* disk_ptr = strstr(json, "\"disk\":");
+    char* temp_ptr = strstr(json, "\"cpu_temp\":");
+    char* net_in_ptr = strstr(json, "\"net_in\":");
+    char* net_out_ptr = strstr(json, "\"net_out\":");
+    char* proc_ptr = strstr(json, "\"processes\":");
+    char* time_ptr = strstr(json, "\"timestamp\":");
+    
+    if(cpu_ptr) new_data.cpu = atof(cpu_ptr + 6);
+    if(mem_ptr) new_data.memory = atof(mem_ptr + 9);
+    if(disk_ptr) new_data.disk = atof(disk_ptr + 7);
+    if(temp_ptr) {
+        new_data.cpu_temp = atof(temp_ptr + 11);
+        // Handle null case
+        if(strstr(temp_ptr + 11, "null")) new_data.cpu_temp = 0;
+    }
+    if(net_in_ptr) new_data.net_in = atof(net_in_ptr + 9);
+    if(net_out_ptr) new_data.net_out = atof(net_out_ptr + 10);
+    if(proc_ptr) new_data.processes = atoi(proc_ptr + 12);
+    if(time_ptr) new_data.timestamp = atol(time_ptr + 12);
+    
+    // Validate data
+    if(cpu_ptr && mem_ptr && disk_ptr) {
+        current_health = new_data;
+        current_health.valid = true;
+        last_data_time = to_ms_since_boot(get_absolute_time());
+        sample_count++;
+        
+        display_compact_status();
+    }
+}
+
+void display_compact_status(void) {
+    // Display in compact format similar to original Python UI
+    printf("[%04lu] CPU=%5.1f%% | RAM=%5.1f%% | DISK=%5.1f%% | TEMP=%5.1fC | NET=D%6.1f U%6.1f KB/s | PROC=%d\n",
+           sample_count,
+           current_health.cpu,
+           current_health.memory,
+           current_health.disk,
+           current_health.cpu_temp,
+           current_health.net_in,
+           current_health.net_out,
+           current_health.processes);
+}
+
 void led_blinking_task(void)
 {
-    const uint32_t interval_ms = 1000;
-    static uint32_t start_ms = 0;
-    static bool led_state = false;
-
-    if (board_millis() - start_ms < interval_ms)
-        return;
-    start_ms += interval_ms;
-
-    board_led_write(led_state);
-    led_state = 1 - led_state;
+    // Add status in future rn it just blinks infinitely lol
+    for(int i = 0; i < 3; i++) {
+        gpio_put(LED_PIN, 1);
+        sleep_ms(100);
+        gpio_put(LED_PIN, 0);
+        sleep_ms(100);
+    }
 }

@@ -38,6 +38,7 @@ add_executable(${PROGRAM_NAME}
 target_link_libraries(${PROGRAM_NAME} PRIVATE
     no-OS-FatFS-SD-SDIO-SPI-RPi-Pico
     pico_stdlib
+    pico_unique_id
     tinyusb_additions
     tinyusb_board
     tinyusb_device
