@@ -18,7 +18,7 @@ set(PICO_SDK_PATH "C:/Users/piers/pico-sdk")
 
 set(PICO_BOARD pico CACHE STRING "Board type")
 
-set(PROGRAM_NAME HID_Storage)
+set(PROGRAM_NAME HID_MSC_CDC)
 
 # Pull in Pico SDK (must be before project)
 include(pico_sdk_import.cmake)
