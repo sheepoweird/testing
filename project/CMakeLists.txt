@@ -43,7 +43,7 @@ target_link_libraries(${PROGRAM_NAME} PRIVATE
     tinyusb_board
     tinyusb_device
     pico_cyw43_arch_lwip_threadsafe_background
-    pico_lwip_dns
+    pico_multicore
 )
 
 target_include_directories(${PROGRAM_NAME} PRIVATE
