@@ -8,11 +8,17 @@
 #include "hardware/gpio.h"
 #include "hid_config.h"
 
+#include "ff.h"
+#include "diskio.h"
+
 #define BUTTON_PIN 20
-#define LED_PIN 9
+#define LED_PIN 6
 #define RX_BUFFER_SIZE 512
 #define DATA_TIMEOUT_MS 10000
 #define MAX_SEQ 512
+
+static FATFS fs;
+static bool sd_mounted = false;
 
 char rx_buffer[RX_BUFFER_SIZE];
 int rx_index = 0;
@@ -60,6 +66,11 @@ int main(void)
     gpio_put(LED_PIN, 0);
 
     printf("System ready - GP%d=Button, GP%d=LED\n", BUTTON_PIN, LED_PIN);
+    
+    // Initialize SD card for logging
+    if (!init_sd_card()) {
+        printf("WARNING: SD card logging disabled\n");
+    }
 
     while (true)
     {
@@ -70,6 +81,9 @@ int main(void)
         uint32_t now = to_ms_since_boot(get_absolute_time());
         if (last_data_time > 0 && (now - last_data_time > DATA_TIMEOUT_MS)) {
             if (current_health.valid || is_connected) {
+                // Log disconnect event to SD card
+                log_disconnect_event();
+                
                 sample_count = 0;
                 current_health.valid = false;
                 is_connected = false;
@@ -326,4 +340,56 @@ void led_blinking_task(void)
     } else {
         gpio_put(LED_PIN, 0);
     }
+}
+
+
+
+
+
+bool init_sd_card(void) {
+    // Initialize SD card
+    FRESULT fr = f_mount(&fs, "0:", 1);
+    if (fr != FR_OK) {
+        printf("SD card mount failed: %d\n", fr);
+        return false;
+    }
+    
+    sd_mounted = true;
+    printf("SD card mounted successfully\n");
+    return true;
+}
+
+void log_disconnect_event(void) {
+    if (!sd_mounted) return;
+    
+    FIL fil;
+    FRESULT fr;
+    UINT bytes_written;
+    
+    // Open file in append mode, create if doesn't exist
+    fr = f_open(&fil, "0:/pico_logs.txt", FA_WRITE | FA_OPEN_APPEND);
+    if (fr != FR_OK) {
+        printf("Failed to open log file: %d\n", fr);
+        return;
+    }
+    
+    // Get timestamp
+    uint32_t timestamp = to_ms_since_boot(get_absolute_time());
+    
+    // Create log message
+    char log_msg[128];
+    snprintf(log_msg, sizeof(log_msg), 
+             "[%lu ms] DISCONNECT - Sample count was %lu\n", 
+             timestamp, sample_count);
+    
+    // Write to file
+    fr = f_write(&fil, log_msg, strlen(log_msg), &bytes_written);
+    if (fr != FR_OK) {
+        printf("Failed to write to log: %d\n", fr);
+    } else {
+        printf("Logged disconnect event to SD card\n");
+    }
+    
+    // Close file to ensure data is saved
+    f_close(&fil);
 }
