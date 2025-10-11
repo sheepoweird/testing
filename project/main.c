@@ -19,8 +19,8 @@
 #include "lwip/err.h"
 #include "lwip/ip4_addr.h"
 
-#define WIFI_SSID "Aydil"
-#define WIFI_PASSWORD "12345678"
+#define WIFI_SSID "Zzz"
+#define WIFI_PASSWORD "i6b22krm"
 
 #define HID_BUTTON_PIN 20
 #define WEBHOOK_BUTTON_PIN 21
@@ -497,11 +497,11 @@ bool try_wifi_connect(void)
         return false;
     }
     
-    printf("IP Address: %d.%d.%d.%d\n",
-           ip & 0xFF,
-           (ip >> 8) & 0xFF,
-           (ip >> 16) & 0xFF,
-           (ip >> 24) & 0xFF);
+    printf("IP Address: %lu.%lu.%lu.%lu\n",
+        ip & 0xFF,
+        (ip >> 8) & 0xFF,
+        (ip >> 16) & 0xFF,
+        (ip >> 24) & 0xFF);
 
     wifi_connected = true;
     last_wifi_check = to_ms_since_boot(get_absolute_time());
@@ -563,69 +563,95 @@ void send_webhook_post(void)
         return;
     }
 
-    // webhook.site IP address - UPDATE THIS if it changes
-    // Get current IP: ping webhook.site or nslookup webhook.site
+    // webhook.site IP address - from your ping results
     ip_addr_t server;
-    IP4_ADDR(&server, 178, 63, 67, 106); // webhook.site IP
+    IP4_ADDR(&server, 178, 63, 67, 106);
 
-    printf("Connecting to webhook.site (46.4.105.116)...\n");
+    printf("Connecting to webhook.site (%lu.%lu.%lu.%lu:80)...\n",
+           server.addr & 0xFF, (server.addr >> 8) & 0xFF,
+           (server.addr >> 16) & 0xFF, (server.addr >> 24) & 0xFF);
 
     err_t connect_err = altcp_connect(pcb, &server, 80, NULL);
-    if (connect_err == ERR_OK)
-    {
-        printf("Connection initiated...\n");
-        sleep_ms(1000); // Wait for connection to establish
-
-        // Create JSON payload
-        char json_body[256];
-        int body_len = snprintf(json_body, sizeof(json_body),
-                                "{\"button\":\"GP21 pressed\",\"timestamp\":%lu,\"device\":\"Pico-W\"}",
-                                to_ms_since_boot(get_absolute_time()));
-
-        // Build HTTP POST request
-        char request[512];
-        int len = snprintf(request, sizeof(request),
-                           "POST /6aae6834-a1a9-4ea8-8518-7c821c2b0fee HTTP/1.1\r\n"
-                           "Host: webhook.site\r\n"
-                           "Content-Type: application/json\r\n"
-                           "Content-Length: %d\r\n"
-                           "Connection: close\r\n"
-                           "\r\n"
-                           "%s",
-                           body_len, json_body);
-
-        printf("Sending POST request...\n");
-        err_t write_err = altcp_write(pcb, request, len, TCP_WRITE_FLAG_COPY);
-        if (write_err == ERR_OK)
-        {
-            altcp_output(pcb);
-            printf("POST request sent successfully!\n");
-            printf("Data: %s\n", json_body);
-
-            // Blink LED to confirm
-            for (int i = 0; i < 6; i++)
-            {
-                gpio_put(LED_PIN, 1);
-                sleep_ms(50);
-                gpio_put(LED_PIN, 0);
-                sleep_ms(50);
-            }
-
-            sleep_ms(2000); // Wait for response
-        }
-        else
-        {
-            printf("Failed to send data, error: %d\n", write_err);
-        }
-
-        altcp_close(pcb);
-    }
-    else
+    if (connect_err != ERR_OK)
     {
         printf("Connection failed, error: %d\n", connect_err);
         altcp_close(pcb);
+        return;
     }
 
+    printf("Connection established...\n");
+    sleep_ms(1000);
+
+    // Create JSON payload with health data
+    char json_body[256];
+    int body_len = 0;
+    
+    if (current_health.valid) {
+        body_len = snprintf(json_body, sizeof(json_body),
+                            "{\"button_pressed\":true,\"timestamp\":%lu,\"device\":\"Pico-W\",\"samples\":%lu,\"cpu\":%.1f,\"memory\":%.1f,\"disk\":%.1f,\"temp\":%.1f}",
+                            to_ms_since_boot(get_absolute_time()), 
+                            sample_count,
+                            current_health.cpu,
+                            current_health.memory,
+                            current_health.disk,
+                            current_health.cpu_temp);
+    } else {
+        body_len = snprintf(json_body, sizeof(json_body),
+                            "{\"button_pressed\":true,\"timestamp\":%lu,\"device\":\"Pico-W\",\"samples\":%lu,\"status\":\"no_data\"}",
+                            to_ms_since_boot(get_absolute_time()), 
+                            sample_count);
+    }
+
+    // Build HTTP POST request
+    char request[512];
+    int len = snprintf(request, sizeof(request),
+                       "POST /6aae6834-a1a9-4ea8-8518-7c821c2b0fee HTTP/1.1\r\n"
+                       "Host: webhook.site\r\n"
+                       "Content-Type: application/json\r\n"
+                       "Content-Length: %d\r\n"
+                       "User-Agent: RaspberryPi-Pico-W\r\n"
+                       "Connection: close\r\n"
+                       "\r\n"
+                       "%s",
+                       body_len, json_body);
+
+    printf("Sending POST request...\n");
+    printf("Payload: %s\n", json_body);
+    
+    err_t write_err = altcp_write(pcb, request, len, TCP_WRITE_FLAG_COPY);
+    if (write_err == ERR_OK)
+    {
+        altcp_output(pcb);
+        printf("POST request sent successfully!\n");
+
+        // Blink LED rapidly to confirm
+        for (int i = 0; i < 8; i++)
+        {
+            gpio_put(LED_PIN, 1);
+            sleep_ms(80);
+            gpio_put(LED_PIN, 0);
+            sleep_ms(80);
+        }
+
+        // Wait for response to be processed
+        printf("Waiting for server response...\n");
+        sleep_ms(2000);
+        printf("Request completed\n");
+    }
+    else
+    {
+        printf("Failed to send data, error: %d\n", write_err);
+        
+        // Error blink pattern
+        for (int i = 0; i < 3; i++) {
+            gpio_put(LED_PIN, 1);
+            sleep_ms(300);
+            gpio_put(LED_PIN, 0);
+            sleep_ms(300);
+        }
+    }
+
+    altcp_close(pcb);
     printf("=== POST complete ===\n\n");
 }
 
