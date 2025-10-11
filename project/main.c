@@ -11,6 +11,18 @@
 #include "ff.h"
 #include "diskio.h"
 
+#include "pico/cyw43_arch.h"
+#include "lwip/altcp_tcp.h"
+#include "lwip/altcp.h"
+#include "lwip/tcp.h"
+#include "lwip/dns.h"
+#include "lwip/err.h"
+#include "lwip/ip4_addr.h"
+
+
+#define WIFI_SSID "Zzz"
+#define WIFI_PASSWORD "i6b22krm"
+
 #define BUTTON_PIN 20
 #define LED_PIN 6
 #define RX_BUFFER_SIZE 512
@@ -23,6 +35,7 @@ static bool sd_mounted = false;
 char rx_buffer[RX_BUFFER_SIZE];
 int rx_index = 0;
 
+// Type definition - MUST come before forward declarations that use it
 typedef struct {
     float cpu;
     float memory;
@@ -34,15 +47,22 @@ typedef struct {
     bool valid;
 } health_data_t;
 
-health_data_t current_health = {0};
-uint32_t last_data_time = 0;
-uint32_t sample_count = 0;
-bool is_connected = false;
-
+// NOW add forward declarations AFTER the typedef
+bool init_sd_card(void);
+void log_disconnect_event(void);
+bool init_wifi(void);
+void test_wifi_post(void);
+void post_to_website(health_data_t* data);
 void hid_task(void);
 void led_blinking_task(void);
 void process_json_data(char* json);
 void display_compact_status(void);
+
+// Global variables
+health_data_t current_health = {0};
+uint32_t last_data_time = 0;
+uint32_t sample_count = 0;
+bool is_connected = false;
 
 int main(void)
 {
@@ -56,20 +76,29 @@ int main(void)
     printf("\033[2J\033[H");  
     
     tud_init(BOARD_TUD_RHPORT);
-
+    
+    // Initialize button input
     gpio_init(BUTTON_PIN);
     gpio_set_dir(BUTTON_PIN, GPIO_IN);
     gpio_pull_up(BUTTON_PIN);
-    
+
+    // LED for Logging status indication
     gpio_init(LED_PIN);
     gpio_set_dir(LED_PIN, GPIO_OUT);
     gpio_put(LED_PIN, 0);
-
-    printf("System ready - GP%d=Button, GP%d=LED\n", BUTTON_PIN, LED_PIN);
     
     // Initialize SD card for logging
     if (!init_sd_card()) {
         printf("WARNING: SD card logging disabled\n");
+    }
+
+    // Initialize WiFi
+    if (init_wifi()) {
+        printf("WiFi ready!\n");
+        sleep_ms(2000);  // Wait a bit
+        test_wifi_post();  // Test POST once at startup
+    } else {
+        printf("WARNING: WiFi disabled\n");
     }
 
     while (true)
@@ -118,10 +147,14 @@ int main(void)
     return 0;
 }
 
+// [------------------------------------------------------------------------- MSC -------------------------------------------------------------------------]
+
 void tud_mount_cb(void) { }
 void tud_umount_cb(void) { }
 void tud_suspend_cb(bool remote_wakeup_en) { (void)remote_wakeup_en; }
 void tud_resume_cb(void) { }
+
+// [------------------------------------------------------------------------- HID -------------------------------------------------------------------------]
 
 typedef struct {
     uint8_t modifier;
@@ -271,6 +304,8 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_
     (void)bufsize;
 }
 
+// [------------------------------------------------------------------------- CDC -------------------------------------------------------------------------]
+
 void process_json_data(char* json) {
     if (!json || strlen(json) == 0) return;
     
@@ -327,6 +362,8 @@ void display_compact_status(void) {
            current_health.processes);
 }
 
+// [------------------------------------------------------------------------- LED -------------------------------------------------------------------------]
+
 void led_blinking_task(void)
 {
     static uint32_t last_toggle = 0;
@@ -342,9 +379,161 @@ void led_blinking_task(void)
     }
 }
 
+// [------------------------------------------------------------------------- Wifi -------------------------------------------------------------------------]
+
+bool init_wifi(void) {
+    if (cyw43_arch_init()) {
+        printf("WiFi init failed\n");
+        return false;
+    }
+    
+    cyw43_arch_enable_sta_mode();
+    printf("Connecting to WiFi...\n");
+    
+    if (cyw43_arch_wifi_connect_timeout_ms(WIFI_SSID, WIFI_PASSWORD, 
+                                            CYW43_AUTH_WPA2_AES_PSK, 30000)) {
+        printf("Failed to connect\n");
+        return false;
+    }
+    
+    printf("WiFi connected!\n");
+    return true;
+}
+
+// DNS callback helper
+static ip_addr_t resolved_addr;
+static volatile bool dns_resolved = false;
+
+static void dns_found_callback(const char *name, const ip_addr_t *addr, void *arg) {
+    (void)name;
+    (void)arg;
+    if (addr) {
+        resolved_addr = *addr;
+        dns_resolved = true;
+        printf("DNS resolved: %s\n", ip4addr_ntoa(addr));
+    } else {
+        printf("DNS resolution failed\n");
+    }
+}
+
+void test_wifi_post(void) {
+    printf("Testing WiFi POST to webhook.site...\n");
+    
+    // Initialize DNS resolution
+    dns_resolved = false;
+    
+    // Resolve webhook.site
+    err_t err = dns_gethostbyname("webhook.site", &resolved_addr, dns_found_callback, NULL);
+    
+    if (err == ERR_OK) {
+        // Already cached
+        printf("DNS already cached\n");
+        dns_resolved = true;
+    } else if (err == ERR_INPROGRESS) {
+        // Wait for DNS resolution (background mode handles it automatically)
+        printf("Waiting for DNS resolution...\n");
+        uint32_t timeout = to_ms_since_boot(get_absolute_time()) + 10000;
+        while (!dns_resolved && to_ms_since_boot(get_absolute_time()) < timeout) {
+            sleep_ms(100);
+            // No need for cyw43_arch_poll() in threadsafe_background mode
+        }
+    } else {
+        printf("DNS query failed with error: %d\n", err);
+        return;
+    }
+    
+    if (!dns_resolved) {
+        printf("DNS resolution failed or timed out\n");
+        return;
+    }
+    
+    printf("Connecting to resolved IP...\n");
+    struct altcp_pcb *pcb = altcp_new(NULL);
+    if (!pcb) {
+        printf("Failed to create TCP connection\n");
+        return;
+    }
+    
+    err_t connect_err = altcp_connect(pcb, &resolved_addr, 80, NULL);
+    if (connect_err == ERR_OK) {
+        printf("Connection initiated...\n");
+        
+        // Give connection time to establish
+        sleep_ms(1000);
+        
+        char request[512];
+        int len = snprintf(request, sizeof(request),
+            "POST /6aae6834-a1a9-4ea8-8518-7c821c2b0fee HTTP/1.1\r\n"
+            "Host: webhook.site\r\n"
+            "Content-Type: application/json\r\n"
+            "Content-Length: 29\r\n"
+            "Connection: close\r\n"
+            "\r\n"
+            "{\"test\":\"hello from pico\"}");
+        
+        err_t write_err = altcp_write(pcb, request, len, TCP_WRITE_FLAG_COPY);
+        if (write_err == ERR_OK) {
+            altcp_output(pcb);
+            printf("Test POST sent to webhook.site!\n");
+            sleep_ms(2000); // Give time for response
+        } else {
+            printf("Write failed with error: %d\n", write_err);
+        }
+        
+        altcp_close(pcb);
+    } else {
+        printf("Connection failed with error: %d\n", connect_err);
+        altcp_close(pcb);
+    }
+}
+
+void post_to_website(health_data_t* data) {
+    if (!dns_resolved) {
+        printf("Cannot post: DNS not resolved\n");
+        return;
+    }
+    
+    struct altcp_pcb *pcb = altcp_new(NULL);
+    if (!pcb) {
+        printf("Failed to create TCP\n");
+        return;
+    }
+    
+    if (altcp_connect(pcb, &resolved_addr, 80, NULL) == ERR_OK) {
+        sleep_ms(500); // Wait for connection
+        
+        char json_body[256];
+        int body_len = snprintf(json_body, sizeof(json_body),
+            "{\"cpu\":%.1f,\"mem\":%.1f,\"disk\":%.1f,\"temp\":%.1f,\"net_in\":%.1f,\"net_out\":%.1f,\"procs\":%d}",
+            data->cpu, data->memory, data->disk, data->cpu_temp,
+            data->net_in, data->net_out, data->processes);
+        
+        char request[768];
+        int len = snprintf(request, sizeof(request),
+            "POST /6aae6834-a1a9-4ea8-8518-7c821c2b0fee HTTP/1.1\r\n"
+            "Host: webhook.site\r\n"
+            "Content-Type: application/json\r\n"
+            "Content-Length: %d\r\n"
+            "Connection: close\r\n"
+            "\r\n"
+            "%s",
+            body_len, json_body);
+        
+        if (altcp_write(pcb, request, len, TCP_WRITE_FLAG_COPY) == ERR_OK) {
+            altcp_output(pcb);
+            printf("Posted health data to webhook.site\n");
+        }
+        
+        sleep_ms(500);
+        altcp_close(pcb);
+    } else {
+        printf("Connection failed\n");
+        altcp_close(pcb);
+    }
+}
 
 
-
+// [------------------------------------------------------------------------- SD Read/Write -------------------------------------------------------------------------]
 
 bool init_sd_card(void) {
     // Initialize SD card

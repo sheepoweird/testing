@@ -16,9 +16,9 @@ cmake_minimum_required(VERSION 3.13...3.27)
 
 set(PICO_SDK_PATH "C:/Users/piers/pico-sdk")
 
-set(PICO_BOARD pico CACHE STRING "Board type")
+set(PICO_BOARD pico_w CACHE STRING "Board type")
 
-set(PROGRAM_NAME HID_MSC_CDC)
+set(PROGRAM_NAME HID_MSC_CDC_LOG_WIFI)
 
 # Pull in Pico SDK (must be before project)
 include(pico_sdk_import.cmake)
@@ -42,10 +42,13 @@ target_link_libraries(${PROGRAM_NAME} PRIVATE
     tinyusb_additions
     tinyusb_board
     tinyusb_device
+    pico_cyw43_arch_lwip_threadsafe_background
+    pico_lwip_dns
 )
 
 target_include_directories(${PROGRAM_NAME} PRIVATE
   ${CMAKE_CURRENT_LIST_DIR}/include
+  ${CMAKE_CURRENT_LIST_DIR} 
 )
 
 # https://datasheets.raspberrypi.com/pico/raspberry-pi-pico-c-sdk.pdf
