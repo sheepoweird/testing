@@ -47,7 +47,6 @@
 #define SYS_STATS                   0
 #define MEMP_STATS                  0
 #define LINK_STATS                  0
-// #define ETH_PAD_SIZE                2
 #define IP_FORWARD                  0
 #define IP_OPTIONS_ALLOWED          0
 #define IP_REASSEMBLY               0
@@ -57,50 +56,7 @@
 #define TCP_MAXRTX                  12
 #define TCP_SYNMAXRTX               6
 
-// Fix for the build error - disable TCP sanity checks
 #define LWIP_DISABLE_TCP_SANITY_CHECKS 1
-
-#if 0
-#define LWIP_DEBUG                  1
-#define TCP_DEBUG                   LWIP_DBG_ON
-#define TCP_INPUT_DEBUG             LWIP_DBG_ON
-#define TCP_FR_DEBUG                LWIP_DBG_ON
-#define TCP_RTO_DEBUG               LWIP_DBG_ON
-#define TCP_CWND_DEBUG              LWIP_DBG_ON
-#define TCP_WND_DEBUG               LWIP_DBG_ON
-#define TCP_OUTPUT_DEBUG            LWIP_DBG_ON
-#define TCP_RST_DEBUG               LWIP_DBG_ON
-#define TCP_QLEN_DEBUG              LWIP_DBG_ON
-#define UDP_DEBUG                   LWIP_DBG_ON
-#define TCPIP_DEBUG                 LWIP_DBG_ON
-#define SLIP_DEBUG                  LWIP_DBG_ON
-#define DHCP_DEBUG                  LWIP_DBG_ON
-#define AUTOIP_DEBUG                LWIP_DBG_ON
-#define DNS_DEBUG                   LWIP_DBG_ON
-#define IP6_DEBUG                   LWIP_DBG_ON
-
-#define IP_DEBUG                    LWIP_DBG_ON
-#define IP_REASS_DEBUG              LWIP_DBG_ON
-#define RAW_DEBUG                   LWIP_DBG_ON
-#define MEM_DEBUG                   LWIP_DBG_ON
-#define MEMP_DEBUG                  LWIP_DBG_ON
-#define SYS_DEBUG                   LWIP_DBG_ON
-#define TIMERS_DEBUG                LWIP_DBG_ON
-#define PPP_DEBUG                   LWIP_DBG_ON
-#define NETIF_DEBUG                 LWIP_DBG_ON
-#define PBUF_DEBUG                  LWIP_DBG_ON
-#define API_LIB_DEBUG               LWIP_DBG_ON
-#define API_MSG_DEBUG               LWIP_DBG_ON
-#define SOCKETS_DEBUG               LWIP_DBG_ON
-#define ICMP_DEBUG                  LWIP_DBG_ON
-#define IGMP_DEBUG                  LWIP_DBG_ON
-#define INET_DEBUG                  LWIP_DBG_ON
-#define NETIF_DEBUG                 LWIP_DBG_ON
-#define ICMP6_DEBUG                 LWIP_DBG_ON
-#define IP6_DEBUG                   LWIP_DBG_ON
-#define IP6_ADDR_DEBUG              LWIP_DBG_ON
-#define ICMP6_DEBUG                 LWIP_DBG_ON
-#endif
 
 #ifndef NDEBUG
 #define LWIP_DEBUG                  1
@@ -111,17 +67,16 @@
 #define LWIP_IPV4                   1
 #define LWIP_IPV6                   0
 
-
 #define LWIP_DHCP                   1
-// Disable address conflict detection
 #define LWIP_DHCP_DOES_ACD_CHECK    0
-// Disable ARP check
 #define DHCP_DOES_ARP_CHECK         0
 
+// HTTPS/TLS Support - ENABLED
 #define LWIP_ALTCP                  1
-// Disable TLS since we're only using HTTP (not HTTPS) and mbedTLS is not available
-#define LWIP_ALTCP_TLS              0
-#define LWIP_ALTCP_TLS_MBEDTLS      0
+#define LWIP_ALTCP_TLS              1
+#define LWIP_ALTCP_TLS_MBEDTLS      1
 
+// Set authentication mode
+#define ALTCP_MBEDTLS_AUTHMODE      MBEDTLS_SSL_VERIFY_REQUIRED
 
 #endif /* __LWIPOPTS_H__ */

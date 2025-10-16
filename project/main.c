@@ -15,35 +15,21 @@
 #include "pico/multicore.h"
 
 #include "pico/cyw43_arch.h"
-#include "lwip/altcp_tcp.h"
-#include "lwip/altcp.h"
-#include "lwip/tcp.h"
-#include "lwip/err.h"
-#include "lwip/ip4_addr.h"
 
-// lwIP
-#include "lwip/dns.h"               // Hostname resolution
-#include "lwip/altcp_tls.h"         // TCP + TLS (+ HTTP == HTTPS)
+#include "lwip/dns.h"
+#include "lwip/altcp_tls.h"
 #include "altcp_tls_mbedtls_structs.h"
-#include "lwip/prot/iana.h"         // HTTPS port number
-
-// Mbed TLS
-#include "mbedtls/ssl.h"            // Server Name Indication TLS extension
-#ifdef MBEDTLS_DEBUG_C
-#include "mbedtls/debug.h"          // Mbed TLS debugging
-#endif //MBEDTLS_DEBUG_C
+#include "lwip/prot/iana.h"
+#include "mbedtls/ssl.h"
 #include "mbedtls/check_config.h"
+#include "picohttps.h"
 
-#include "mbedtls/ssl.h" 
-#include "mbedtls/debug.h"  
-#include "mbedtls/check_config.h"
-#include "picohttps.h" 
 
 #define WIFI_SSID "Zzz"
 #define WIFI_PASSWORD "i6b22krm"
 
 #define HID_BUTTON_PIN 20
-#define WEBHOOK_BUTTON_PIN 21
+#define WEBHOOK_BUTTON_PIN 22
 
 // SD Card LED status
 // Pin 6 = Wifi status
@@ -82,7 +68,6 @@ bool init_sd_card(void);
 bool init_wifi(void);
 bool try_wifi_connect(void);
 void check_wifi_connection(void);
-void send_webhook_post(void);
 void check_webhook_button(void);
 void core1_entry(void);
 
@@ -107,7 +92,7 @@ bool is_connected = false;
 // 6. Send HTTPS POST request to web monitoring server. (Every 5 seconds)
 
 // have GP20 as HID button
-// have GP21 as webhook.site button
+// have GP22 as webhook.site button
 
 
 int main(void)
@@ -585,137 +570,294 @@ void check_wifi_connection(void)
     }
 }
 
-// [------------------------------------------------------------------------- Webhook POST -------------------------------------------------------------------------]
-
-void send_webhook_post(void)
-{
-    if (!wifi_connected)
-    {
-        printf("Cannot send POST - WiFi not connected\n");
-        return;
-    }
-
-    printf("\n=== Sending POST to webhook.site ===\n");
-
-    struct altcp_pcb *pcb = altcp_new(NULL);
-    if (!pcb)
-    {
-        printf("Failed to create TCP connection\n");
-        return;
-    }
-
-    // webhook.site IP address - from your ping results
-    ip_addr_t server;
-    IP4_ADDR(&server, 178, 63, 67, 106);
-
-    printf("Connecting to webhook.site (%lu.%lu.%lu.%lu:80)...\n",
-           server.addr & 0xFF, (server.addr >> 8) & 0xFF,
-           (server.addr >> 16) & 0xFF, (server.addr >> 24) & 0xFF);
-
-    err_t connect_err = altcp_connect(pcb, &server, 80, NULL);
-    if (connect_err != ERR_OK)
-    {
-        printf("Connection failed, error: %d\n", connect_err);
-        altcp_close(pcb);
-        return;
-    }
-
-    printf("Connection established...\n");
-    sleep_ms(1000);
-
-    // Create JSON payload with health data
-    char json_body[256];
-    int body_len = 0;
-    
-    if (current_health.valid) {
-        body_len = snprintf(json_body, sizeof(json_body),
-                            "{\"button_pressed\":true,\"timestamp\":%lu,\"device\":\"Pico-W\",\"samples\":%lu,\"cpu\":%.1f,\"memory\":%.1f,\"disk\":%.1f,\"temp\":%.1f}",
-                            to_ms_since_boot(get_absolute_time()), 
-                            sample_count,
-                            current_health.cpu,
-                            current_health.memory,
-                            current_health.disk,
-                            current_health.cpu_temp);
-    } else {
-        body_len = snprintf(json_body, sizeof(json_body),
-                            "{\"button_pressed\":true,\"timestamp\":%lu,\"device\":\"Pico-W\",\"samples\":%lu,\"status\":\"no_data\"}",
-                            to_ms_since_boot(get_absolute_time()), 
-                            sample_count);
-    }
-
-    // Build HTTP POST request
-    char request[512];
-    int len = snprintf(request, sizeof(request),
-                       "POST /6aae6834-a1a9-4ea8-8518-7c821c2b0fee HTTP/1.1\r\n"
-                       "Host: webhook.site\r\n"
-                       "Content-Type: application/json\r\n"
-                       "Content-Length: %d\r\n"
-                       "User-Agent: RaspberryPi-Pico-W\r\n"
-                       "Connection: close\r\n"
-                       "\r\n"
-                       "%s",
-                       body_len, json_body);
-
-    printf("Sending POST request...\n");
-    printf("Payload: %s\n", json_body);
-    
-    err_t write_err = altcp_write(pcb, request, len, TCP_WRITE_FLAG_COPY);
-    if (write_err == ERR_OK)
-    {
-        altcp_output(pcb);
-        printf("POST request sent successfully!\n");
-
-        // Blink LED rapidly to confirm
-        for (int i = 0; i < 8; i++)
-        {
-            gpio_put(LED_PIN, 1);
-            sleep_ms(80);
-            gpio_put(LED_PIN, 0);
-            sleep_ms(80);
-        }
-
-        // Wait for response to be processed
-        printf("Waiting for server response...\n");
-        sleep_ms(2000);
-        printf("Request completed\n");
-    }
-    else
-    {
-        printf("Failed to send data, error: %d\n", write_err);
-        
-        // Error blink pattern
-        for (int i = 0; i < 3; i++) {
-            gpio_put(LED_PIN, 1);
-            sleep_ms(300);
-            gpio_put(LED_PIN, 0);
-            sleep_ms(300);
-        }
-    }
-
-    altcp_close(pcb);
-    printf("=== POST complete ===\n\n");
-}
 
 void check_webhook_button(void)
 {
-    static bool last_button_state = true; // Pull-up, so true = not pressed
+    static bool last_button_state = true;
     static uint32_t debounce_time = 0;
 
     bool current_state = gpio_get(WEBHOOK_BUTTON_PIN);
     uint32_t now = to_ms_since_boot(get_absolute_time());
 
-    // Debounce: button pressed (goes LOW due to pull-up)
     if (!current_state && last_button_state)
     {
         if (now - debounce_time > 200)
-        { // 200ms debounce
-            printf("\n>>> GP21 Button Pressed! <<<\n");
-            send_webhook_post();
+        {
+            printf("\n>>> GP22 Button Pressed! <<<\n");  // Changed from GP21
+            send_https_post();  // Changed function name
             debounce_time = now;
         }
     }
 
     last_button_state = current_state;
+}
+
+
+// [------------------------------------------------------------------------- HTTPS Helper Functions -------------------------------------------------------------------------]
+
+// Resolve hostname using DNS
+bool resolve_hostname(ip_addr_t* ipaddr) {
+    ipaddr->addr = IPADDR_ANY;
+    
+    cyw43_arch_lwip_begin();
+    err_t dns_err = dns_gethostbyname(
+        PICOHTTPS_HOSTNAME,
+        ipaddr,
+        NULL,  // No callback needed for synchronous approach
+        NULL
+    );
+    cyw43_arch_lwip_end();
+    
+    if (dns_err == ERR_INPROGRESS) {
+        // Wait for DNS resolution
+        int retries = 50;  // 5 seconds timeout
+        while (ipaddr->addr == IPADDR_ANY && retries-- > 0) {
+            sleep_ms(100);
+        }
+        
+        if (ipaddr->addr == IPADDR_NONE || ipaddr->addr == IPADDR_ANY) {
+            printf("DNS resolution failed\n");
+            return false;
+        }
+    } else if (dns_err != ERR_OK) {
+        printf("DNS error: %d\n", dns_err);
+        return false;
+    }
+    
+    return true;
+}
+
+// Free ALTCP PCB
+void altcp_free_pcb(struct altcp_pcb* pcb) {
+    cyw43_arch_lwip_begin();
+    err_t err = altcp_close(pcb);
+    cyw43_arch_lwip_end();
+    
+    int retries = 10;
+    while (err != ERR_OK && retries-- > 0) {
+        sleep_ms(PICOHTTPS_ALTCP_CONNECT_POLL_INTERVAL);
+        cyw43_arch_lwip_begin();
+        err = altcp_close(pcb);
+        cyw43_arch_lwip_end();
+    }
+}
+
+// Free ALTCP TLS config
+void altcp_free_config(struct altcp_tls_config* config) {
+    cyw43_arch_lwip_begin();
+    altcp_tls_free_config(config);
+    cyw43_arch_lwip_end();
+}
+
+// Free callback argument
+void altcp_free_arg(struct altcp_callback_arg* arg) {
+    if (arg) {
+        free(arg);
+    }
+}
+
+// ALTCP callbacks
+void callback_altcp_err(void* arg, err_t err) {
+    printf("Connection error: %d\n", err);
+    
+    if (arg) {
+        struct altcp_callback_arg* cb_arg = (struct altcp_callback_arg*)arg;
+        if (cb_arg->config) {
+            altcp_free_config(cb_arg->config);
+        }
+        altcp_free_arg(cb_arg);
+    }
+}
+
+err_t callback_altcp_poll(void* arg, struct altcp_pcb* pcb) {
+    (void)arg;
+    (void)pcb;
+    return ERR_OK;
+}
+
+err_t callback_altcp_sent(void* arg, struct altcp_pcb* pcb, u16_t len) {
+    (void)pcb;
+    ((struct altcp_callback_arg*)arg)->acknowledged = len;
+    return ERR_OK;
+}
+
+err_t callback_altcp_recv(void* arg, struct altcp_pcb* pcb, struct pbuf* buf, err_t err) {
+    (void)arg;
+    
+    if (err == ERR_OK && buf) {
+        // Print received data
+        struct pbuf* p = buf;
+        while (p != NULL) {
+            printf("%.*s", p->len, (char*)p->payload);
+            p = p->next;
+        }
+        
+        altcp_recved(pcb, buf->tot_len);
+        pbuf_free(buf);
+    } else if (err == ERR_ABRT) {
+        if (buf) pbuf_free(buf);
+        return ERR_ABRT;
+    }
+    
+    return ERR_OK;
+}
+
+err_t callback_altcp_connect(void* arg, struct altcp_pcb* pcb, err_t err) {
+    (void)pcb;
+    if (err == ERR_OK) {
+        ((struct altcp_callback_arg*)arg)->connected = true;
+    }
+    return ERR_OK;
+}
+
+// Establish HTTPS connection
+bool connect_to_host(ip_addr_t* ipaddr, struct altcp_pcb** pcb) {
+    // Create TLS config with CA certificate
+    u8_t ca_cert[] = PICOHTTPS_CA_ROOT_CERT;
+    
+    cyw43_arch_lwip_begin();
+    struct altcp_tls_config* config = altcp_tls_create_config_client(
+        ca_cert,
+        sizeof(ca_cert)
+    );
+    cyw43_arch_lwip_end();
+    
+    if (!config) {
+        printf("Failed to create TLS config\n");
+        return false;
+    }
+    
+    // Create ALTCP PCB with TLS
+    cyw43_arch_lwip_begin();
+    *pcb = altcp_tls_new(config, IPADDR_TYPE_V4);
+    cyw43_arch_lwip_end();
+    
+    if (!(*pcb)) {
+        printf("Failed to create TLS PCB\n");
+        altcp_free_config(config);
+        return false;
+    }
+    
+    // Set SNI hostname
+    cyw43_arch_lwip_begin();
+    int mbedtls_err = mbedtls_ssl_set_hostname(
+        &(((altcp_mbedtls_state_t*)((*pcb)->state))->ssl_context),
+        PICOHTTPS_HOSTNAME
+    );
+    cyw43_arch_lwip_end();
+    
+    if (mbedtls_err) {
+        printf("Failed to set SNI hostname: %d\n", mbedtls_err);
+        altcp_free_pcb(*pcb);
+        altcp_free_config(config);
+        return false;
+    }
+    
+    // Allocate callback argument
+    struct altcp_callback_arg* arg = malloc(sizeof(*arg));
+    if (!arg) {
+        printf("Failed to allocate callback arg\n");
+        altcp_free_pcb(*pcb);
+        altcp_free_config(config);
+        return false;
+    }
+    
+    arg->config = config;
+    arg->connected = false;
+    arg->acknowledged = 0;
+    
+    // Set callbacks
+    cyw43_arch_lwip_begin();
+    altcp_arg(*pcb, arg);
+    altcp_err(*pcb, callback_altcp_err);
+    altcp_poll(*pcb, callback_altcp_poll, PICOHTTPS_ALTCP_IDLE_POLL_INTERVAL);
+    altcp_sent(*pcb, callback_altcp_sent);
+    altcp_recv(*pcb, callback_altcp_recv);
+    cyw43_arch_lwip_end();
+    
+    // Connect
+    cyw43_arch_lwip_begin();
+    err_t conn_err = altcp_connect(*pcb, ipaddr, LWIP_IANA_PORT_HTTPS, callback_altcp_connect);
+    cyw43_arch_lwip_end();
+    
+    if (conn_err == ERR_OK) {
+        // Wait for connection
+        int retries = 100;  // 10 seconds timeout
+        while (!arg->connected && retries-- > 0) {
+            sleep_ms(PICOHTTPS_ALTCP_CONNECT_POLL_INTERVAL);
+        }
+        
+        if (!arg->connected) {
+            printf("Connection timeout\n");
+            altcp_free_pcb(*pcb);
+            altcp_free_config(config);
+            altcp_free_arg(arg);
+            return false;
+        }
+    } else {
+        printf("Connection failed: %d\n", conn_err);
+        altcp_free_pcb(*pcb);
+        altcp_free_config(config);
+        altcp_free_arg(arg);
+        return false;
+    }
+    
+    return true;
+}
+
+// Send HTTPS POST request
+bool send_request(struct altcp_pcb* pcb, const char* body) {
+    int body_len = strlen(body);
+    
+    char request[512];
+    int req_len = snprintf(request, sizeof(request),
+        "POST /6aae6834-a1a9-4ea8-8518-7c821c2b0fee HTTP/1.1\r\n"
+        "Host: %s\r\n"
+        "Content-Type: application/json\r\n"
+        "Content-Length: %d\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+        "%s",
+        PICOHTTPS_HOSTNAME, body_len, body
+    );
+    
+    if (req_len <= 0 || req_len >= sizeof(request)) {
+        printf("Request buffer overflow\n");
+        return false;
+    }
+    
+    ((struct altcp_callback_arg*)(pcb->arg))->acknowledged = 0;
+    
+    cyw43_arch_lwip_begin();
+    err_t write_err = altcp_write(pcb, request, req_len, TCP_WRITE_FLAG_COPY);
+    cyw43_arch_lwip_end();
+    
+    if (write_err != ERR_OK) {
+        printf("Write error: %d\n", write_err);
+        return false;
+    }
+    
+    cyw43_arch_lwip_begin();
+    err_t output_err = altcp_output(pcb);
+    cyw43_arch_lwip_end();
+    
+    if (output_err != ERR_OK) {
+        printf("Output error: %d\n", output_err);
+        return false;
+    }
+    
+    // Wait for acknowledgment
+    int retries = 50;  // 5 seconds timeout
+    while (((struct altcp_callback_arg*)(pcb->arg))->acknowledged == 0 && retries-- > 0) {
+        sleep_ms(PICOHTTPS_HTTP_RESPONSE_POLL_INTERVAL);
+    }
+    
+    if (((struct altcp_callback_arg*)(pcb->arg))->acknowledged != req_len) {
+        printf("Incomplete acknowledgment\n");
+        return false;
+    }
+    
+    return true;
 }
 
 // [------------------------------------------------------------------------- Core 1 - WiFi Handler -------------------------------------------------------------------------]
@@ -743,6 +885,104 @@ void core1_entry(void)
         sleep_ms(100); // Don't hog the core
     }
 }
+
+// [------------------------------------------------------------------------- HTTPS POST -------------------------------------------------------------------------]
+
+void send_https_post(void) {
+    if (!wifi_connected) {
+        printf("Cannot send POST - WiFi not connected\n");
+        return;
+    }
+
+    printf("\n=== Sending HTTPS POST to webhook.site ===\n");
+
+    // Resolve hostname
+    ip_addr_t server_ip;
+    printf("Resolving %s...\n", PICOHTTPS_HOSTNAME);
+    if (!resolve_hostname(&server_ip)) {
+        printf("Failed to resolve hostname\n");
+        return;
+    }
+    
+    cyw43_arch_lwip_begin();
+    char* ip_str = ipaddr_ntoa(&server_ip);
+    cyw43_arch_lwip_end();
+    printf("Resolved to: %s\n", ip_str);
+
+    // Establish HTTPS connection
+    struct altcp_pcb* pcb = NULL;
+    printf("Connecting to https://%s:443...\n", ip_str);
+    if (!connect_to_host(&server_ip, &pcb)) {
+        printf("Failed to establish HTTPS connection\n");
+        return;
+    }
+    printf("HTTPS connection established!\n");
+
+    // Create JSON payload
+    char json_body[256];
+    int body_len;
+    
+    if (current_health.valid) {
+        body_len = snprintf(json_body, sizeof(json_body),
+            "{\"button_pressed\":true,\"timestamp\":%lu,\"device\":\"Pico-W\",\"samples\":%lu,\"cpu\":%.1f,\"memory\":%.1f,\"disk\":%.1f,\"temp\":%.1f}",
+            to_ms_since_boot(get_absolute_time()), 
+            sample_count,
+            current_health.cpu,
+            current_health.memory,
+            current_health.disk,
+            current_health.cpu_temp);
+    } else {
+        body_len = snprintf(json_body, sizeof(json_body),
+            "{\"button_pressed\":true,\"timestamp\":%lu,\"device\":\"Pico-W\",\"samples\":%lu,\"status\":\"no_data\"}",
+            to_ms_since_boot(get_absolute_time()), 
+            sample_count);
+    }
+
+    printf("Payload: %s\n", json_body);
+
+    // Send HTTPS POST request
+    printf("Sending HTTPS POST request...\n");
+    if (!send_request(pcb, json_body)) {
+        printf("Failed to send request\n");
+        
+        // Error blink pattern
+        for (int i = 0; i < 3; i++) {
+            gpio_put(LED_PIN, 1);
+            sleep_ms(300);
+            gpio_put(LED_PIN, 0);
+            sleep_ms(300);
+        }
+    } else {
+        printf("Request sent successfully!\n");
+        
+        // Success blink pattern
+        for (int i = 0; i < 8; i++) {
+            gpio_put(LED_PIN, 1);
+            sleep_ms(80);
+            gpio_put(LED_PIN, 0);
+            sleep_ms(80);
+        }
+    }
+
+    // Wait for response
+    printf("Waiting for response...\n");
+    sleep_ms(5000);
+
+    // Cleanup
+    if (pcb) {
+        struct altcp_callback_arg* arg = (struct altcp_callback_arg*)(pcb->arg);
+        altcp_free_pcb(pcb);
+        if (arg) {
+            if (arg->config) {
+                altcp_free_config(arg->config);
+            }
+            altcp_free_arg(arg);
+        }
+    }
+
+    printf("=== HTTPS POST complete ===\n\n");
+}
+
 
 // [------------------------------------------------------------------------- SD Read/Write -------------------------------------------------------------------------]
 
