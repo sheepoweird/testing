@@ -11,20 +11,49 @@
 #include "ff.h"
 #include "diskio.h"
 
-#include "pico/cyw43_arch.h"
+// Multicore, run wifi and sd card separately
 #include "pico/multicore.h"
+
+#include "pico/cyw43_arch.h"
 #include "lwip/altcp_tcp.h"
 #include "lwip/altcp.h"
 #include "lwip/tcp.h"
 #include "lwip/err.h"
 #include "lwip/ip4_addr.h"
 
+// lwIP
+#include "lwip/dns.h"               // Hostname resolution
+#include "lwip/altcp_tls.h"         // TCP + TLS (+ HTTP == HTTPS)
+#include "altcp_tls_mbedtls_structs.h"
+#include "lwip/prot/iana.h"         // HTTPS port number
+
+// Mbed TLS
+#include "mbedtls/ssl.h"            // Server Name Indication TLS extension
+#ifdef MBEDTLS_DEBUG_C
+#include "mbedtls/debug.h"          // Mbed TLS debugging
+#endif //MBEDTLS_DEBUG_C
+#include "mbedtls/check_config.h"
+
+#include "mbedtls/ssl.h" 
+#include "mbedtls/debug.h"  
+#include "mbedtls/check_config.h"
+#include "picohttps.h" 
+
 #define WIFI_SSID "Zzz"
 #define WIFI_PASSWORD "i6b22krm"
 
 #define HID_BUTTON_PIN 20
 #define WEBHOOK_BUTTON_PIN 21
+
+// SD Card LED status
+// Pin 6 = Wifi status
+// Pin 7 = Handshake connection to web server (not implemented)
+// Pin 8 = SD Card status
+// Pin 9 = Error Status pin eg. wifi error = (Pin 6 + Pin 9) or wifi & Handshake error = (Pin 6 + Pin 7 + Pin 9)
+
+// 6 currently SD card
 #define LED_PIN 6
+
 #define RX_BUFFER_SIZE 512
 #define DATA_TIMEOUT_MS 10000
 #define MAX_SEQ 512
@@ -68,6 +97,18 @@ health_data_t current_health = {0};
 uint32_t last_data_time = 0;
 uint32_t sample_count = 0;
 bool is_connected = false;
+
+// Sequence of operations on boot
+// 1. Wifi Successful
+// 2. ATEC Chip ???  (not ready yet later implement)
+// 3. SD card MSC successfully loaded
+// 4. trigger HID to open file
+// 5. Python file returns json data back with CDC serial
+// 6. Send HTTPS POST request to web monitoring server. (Every 5 seconds)
+
+// have GP20 as HID button
+// have GP21 as webhook.site button
+
 
 int main(void)
 {
