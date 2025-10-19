@@ -18,7 +18,7 @@ set(PICO_SDK_PATH "C:/Users/piers/pico-sdk")
 
 set(PICO_BOARD pico_w CACHE STRING "Board type")
 
-set(PROGRAM_NAME HID_MSC_CDC_LOG_WIFI)
+set(PROGRAM_NAME HID_MSC_CDC_LOG_WIFI_HTTPS)
 
 # Pull in Pico SDK (must be before project)
 include(pico_sdk_import.cmake)
@@ -44,6 +44,8 @@ target_link_libraries(${PROGRAM_NAME} PRIVATE
     tinyusb_device
     pico_cyw43_arch_lwip_threadsafe_background
     pico_multicore
+    pico_lwip_mbedtls
+    pico_mbedtls
 )
 
 target_include_directories(${PROGRAM_NAME} PRIVATE

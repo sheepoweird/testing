@@ -18,6 +18,12 @@
 #include "lwip/tcp.h"
 #include "lwip/err.h"
 #include "lwip/ip4_addr.h"
+#include "lwip/altcp_tls.h"
+#include "altcp_tls_mbedtls_structs.h"
+#include "lwip/prot/iana.h"
+#include "lwip/dns.h"
+#include "mbedtls/ssl.h"
+#include "https_config.h"
 
 #define WIFI_SSID "Zzz"
 #define WIFI_PASSWORD "i6b22krm"
@@ -57,6 +63,12 @@ void send_webhook_post(void);
 void check_webhook_button(void);
 void core1_entry(void);
 
+// Add these new declarations:
+void dns_callback(const char* name, const ip_addr_t* ipaddr, void* arg);
+err_t https_connected_callback(void* arg, struct altcp_pcb* tpcb, err_t err);
+err_t https_recv_callback(void* arg, struct altcp_pcb* tpcb, struct pbuf* p, err_t err);
+void https_err_callback(void* arg, err_t err);
+
 void log_disconnect_event(void);
 void hid_task(void);
 void led_blinking_task(void);
@@ -68,6 +80,19 @@ health_data_t current_health = {0};
 uint32_t last_data_time = 0;
 uint32_t sample_count = 0;
 bool is_connected = false;
+
+// HTTPS connection state
+typedef struct {
+    struct altcp_tls_config* tls_config;
+    bool connected;
+    bool request_sent;
+    uint16_t bytes_received;
+} https_state_t;
+
+static https_state_t https_state = {0};
+
+// Add this new variable for inter-core communication:
+static volatile bool webhook_trigger = false;
 
 int main(void)
 {
@@ -521,17 +546,10 @@ void check_wifi_connection(void)
     last_wifi_check = now;
 
     // Check if we're still connected
-    int link_status = cyw43_wifi_link_status(&cyw43_state, CYW43_ITF_STA);
+    int link_status = cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA);
 
-    if (link_status == CYW43_LINK_UP)
-    {
-        if (!wifi_connected)
-        {
-            printf("WiFi connection restored!\n");
-            wifi_connected = true;
-        }
-    }
-    else
+    // Only reconnect if truly disconnected (not just "no packets")
+    if (link_status == CYW43_LINK_DOWN || link_status == CYW43_LINK_FAIL || link_status == CYW43_LINK_NONET)
     {
         if (wifi_connected)
         {
@@ -542,6 +560,78 @@ void check_wifi_connection(void)
         // Try to reconnect
         try_wifi_connect();
     }
+    else if (link_status == CYW43_LINK_UP)
+    {
+        if (!wifi_connected)
+        {
+            printf("WiFi connection restored!\n");
+        }
+        wifi_connected = true;
+    }
+}
+
+// [------------------------------------------------------------------------- HTTPS Callbacks -------------------------------------------------------------------------]
+
+void dns_callback(const char* name, const ip_addr_t* ipaddr, void* arg)
+{
+    if (ipaddr) {
+        printf("DNS resolved: %s -> %s\n", name, ip4addr_ntoa(ipaddr));
+        *((ip_addr_t*)arg) = *ipaddr;
+    } else {
+        printf("DNS resolution failed for %s\n", name);
+        ((ip_addr_t*)arg)->addr = 0;
+    }
+}
+
+err_t https_connected_callback(void* arg, struct altcp_pcb* tpcb, err_t err)
+{
+    (void)arg;
+    
+    if (err != ERR_OK) {
+        printf("HTTPS connection failed: %d\n", err);
+        return err;
+    }
+
+    printf("HTTPS connection established!\n");
+    https_state.connected = true;
+    
+    return ERR_OK;
+}
+
+err_t https_recv_callback(void* arg, struct altcp_pcb* tpcb, struct pbuf* p, err_t err)
+{
+    (void)arg;
+    
+    if (err != ERR_OK || p == NULL) {
+        if (p) pbuf_free(p);
+        return err;
+    }
+
+    // Print response
+    struct pbuf* current = p;
+    while (current != NULL) {
+        printf("%.*s", current->len, (char*)current->payload);
+        https_state.bytes_received += current->len;
+        current = current->next;
+    }
+
+    altcp_recved(tpcb, p->tot_len);
+    pbuf_free(p);
+    
+    return ERR_OK;
+}
+
+void https_err_callback(void* arg, err_t err)
+{
+    (void)arg;
+    printf("HTTPS error callback: %d\n", err);
+    
+    if (https_state.tls_config) {
+        altcp_tls_free_config(https_state.tls_config);
+        https_state.tls_config = NULL;
+    }
+    
+    https_state.connected = false;
 }
 
 // [------------------------------------------------------------------------- Webhook POST -------------------------------------------------------------------------]
@@ -554,96 +644,169 @@ void send_webhook_post(void)
         return;
     }
 
-    printf("\n=== Sending POST to webhook.site ===\n");
+    printf("\n=== Sending HTTPS POST to webhook.site ===\n");
 
-    struct altcp_pcb *pcb = altcp_new(NULL);
-    if (!pcb)
-    {
-        printf("Failed to create TCP connection\n");
+    // Reset state
+    https_state.connected = false;
+    https_state.request_sent = false;
+    https_state.bytes_received = 0;
+
+    // Step 1: Resolve DNS
+    ip_addr_t server_ip;
+    server_ip.addr = 0;
+
+    printf("Resolving %s...\n", WEBHOOK_HOSTNAME);
+    
+    err_t dns_err = dns_gethostbyname(WEBHOOK_HOSTNAME, &server_ip, dns_callback, &server_ip);
+
+    if (dns_err == ERR_INPROGRESS) {
+        // Wait for DNS resolution
+        int timeout = 0;
+        while (server_ip.addr == 0 && timeout < 100) {
+            sleep_ms(100);
+            timeout++;
+        }
+    }
+
+    if (server_ip.addr == 0) {
+        printf("DNS resolution failed\n");
         return;
     }
 
-    // webhook.site IP address - UPDATE THIS if it changes
-    // Get current IP: ping webhook.site or nslookup webhook.site
-    ip_addr_t server;
-    IP4_ADDR(&server, 178, 63, 67, 106); // webhook.site IP
+    printf("Resolved to: %s\n", ip4addr_ntoa(&server_ip));
 
-    printf("Connecting to webhook.site (46.4.105.116)...\n");
+    // Step 2: Create TLS configuration
+    u8_t ca_cert[] = CA_CERT;
+    
+    https_state.tls_config = altcp_tls_create_config_client(ca_cert, sizeof(ca_cert));
 
-    err_t connect_err = altcp_connect(pcb, &server, 80, NULL);
-    if (connect_err == ERR_OK)
-    {
-        printf("Connection initiated...\n");
-        sleep_ms(1000); // Wait for connection to establish
+    if (!https_state.tls_config) {
+        printf("Failed to create TLS config\n");
+        return;
+    }
 
-        // Create JSON payload
-        char json_body[256];
-        int body_len = snprintf(json_body, sizeof(json_body),
-                                "{\"button\":\"GP21 pressed\",\"timestamp\":%lu,\"device\":\"Pico-W\"}",
-                                to_ms_since_boot(get_absolute_time()));
+    // Step 3: Create TLS PCB
+    struct altcp_pcb* pcb = altcp_tls_new(https_state.tls_config, IPADDR_TYPE_V4);
 
-        // Build HTTP POST request
-        char request[512];
-        int len = snprintf(request, sizeof(request),
-                           "POST /6aae6834-a1a9-4ea8-8518-7c821c2b0fee HTTP/1.1\r\n"
-                           "Host: webhook.site\r\n"
+    if (!pcb) {
+        printf("Failed to create TLS PCB\n");
+        altcp_tls_free_config(https_state.tls_config);
+        https_state.tls_config = NULL;
+        return;
+    }
+
+    // Step 4: Set SNI hostname
+    int mbedtls_err = mbedtls_ssl_set_hostname(
+        &(((altcp_mbedtls_state_t*)(pcb->state))->ssl_context),
+        WEBHOOK_HOSTNAME
+    );
+
+    if (mbedtls_err != 0) {
+        printf("Failed to set SNI hostname\n");
+        altcp_close(pcb);
+        altcp_tls_free_config(https_state.tls_config);
+        https_state.tls_config = NULL;
+        return;
+    }
+
+    // Step 5: Set up callbacks
+    altcp_arg(pcb, &https_state);
+    altcp_err(pcb, https_err_callback);
+    altcp_recv(pcb, https_recv_callback);
+
+    // Step 6: Connect
+    printf("Connecting to %s:443...\n", WEBHOOK_HOSTNAME);
+    
+    err_t connect_err = altcp_connect(pcb, &server_ip, 443, https_connected_callback);
+
+    if (connect_err != ERR_OK) {
+        printf("Connection failed: %d\n", connect_err);
+        altcp_close(pcb);
+        altcp_tls_free_config(https_state.tls_config);
+        https_state.tls_config = NULL;
+        return;
+    }
+
+    // Wait for connection - poll lwIP to process packets
+    int timeout = 0;
+    while (!https_state.connected && timeout < 150) {
+        cyw43_arch_poll();  // Let lwIP process packets
+        sleep_ms(100);
+        timeout++;
+    }
+
+    if (!https_state.connected) {
+        printf("Connection timeout\n");
+        altcp_close(pcb);
+        return;
+    }
+
+    // Step 7: Send HTTPS POST request
+    char json_body[256];
+    int body_len = snprintf(json_body, sizeof(json_body),
+                            "{\"button\":\"GP21 pressed\",\"timestamp\":%lu,\"device\":\"Pico-W\"}",
+                            to_ms_since_boot(get_absolute_time()));
+
+    char request[512];
+    int req_len = snprintf(request, sizeof(request),
+                           "POST /%s HTTP/1.1\r\n"
+                           "Host: %s\r\n"
                            "Content-Type: application/json\r\n"
                            "Content-Length: %d\r\n"
                            "Connection: close\r\n"
                            "\r\n"
                            "%s",
-                           body_len, json_body);
+                           WEBHOOK_TOKEN, WEBHOOK_HOSTNAME, body_len, json_body);
 
-        printf("Sending POST request...\n");
-        err_t write_err = altcp_write(pcb, request, len, TCP_WRITE_FLAG_COPY);
-        if (write_err == ERR_OK)
-        {
-            altcp_output(pcb);
-            printf("POST request sent successfully!\n");
-            printf("Data: %s\n", json_body);
+    printf("Sending HTTPS request...\n");
+    
+    err_t write_err = altcp_write(pcb, request, req_len, TCP_WRITE_FLAG_COPY);
 
-            // Blink LED to confirm
-            for (int i = 0; i < 6; i++)
-            {
-                gpio_put(LED_PIN, 1);
-                sleep_ms(50);
-                gpio_put(LED_PIN, 0);
-                sleep_ms(50);
-            }
+    if (write_err == ERR_OK) {
+        altcp_output(pcb);
+        
+        printf("Request sent! Waiting for response...\n");
+        https_state.request_sent = true;
 
-            sleep_ms(2000); // Wait for response
-        }
-        else
-        {
-            printf("Failed to send data, error: %d\n", write_err);
+        // Wait for response - poll lwIP
+        for (int i = 0; i < 30; i++) {
+            cyw43_arch_poll();
+            sleep_ms(100);
         }
 
-        altcp_close(pcb);
-    }
-    else
-    {
-        printf("Connection failed, error: %d\n", connect_err);
-        altcp_close(pcb);
+        // Blink LED to confirm
+        for (int i = 0; i < 6; i++) {
+            gpio_put(LED_PIN, 1);
+            sleep_ms(50);
+            gpio_put(LED_PIN, 0);
+            sleep_ms(50);
+        }
+
+        printf("\nReceived %d bytes\n", https_state.bytes_received);
+    } else {
+        printf("Failed to send request: %d\n", write_err);
     }
 
-    printf("=== POST complete ===\n\n");
+    // Cleanup
+    altcp_close(pcb);
+
+    printf("=== HTTPS POST complete ===\n\n");
 }
 
 void check_webhook_button(void)
 {
-    static bool last_button_state = true; // Pull-up, so true = not pressed
+    static bool last_button_state = true;
     static uint32_t debounce_time = 0;
 
     bool current_state = gpio_get(WEBHOOK_BUTTON_PIN);
     uint32_t now = to_ms_since_boot(get_absolute_time());
 
-    // Debounce: button pressed (goes LOW due to pull-up)
     if (!current_state && last_button_state)
     {
         if (now - debounce_time > 200)
-        { // 200ms debounce
+        {
             printf("\n>>> GP21 Button Pressed! <<<\n");
-            send_webhook_post();
+            webhook_trigger = true;  // Signal Core 1 to send
             debounce_time = now;
         }
     }
@@ -657,7 +820,6 @@ void core1_entry(void)
 {
     printf("Core 1: Starting WiFi on separate core\n");
 
-    // Initialize WiFi on Core 1
     sleep_ms(1000);
 
     if (init_wifi())
@@ -669,11 +831,19 @@ void core1_entry(void)
         printf("Core 1: WiFi failed\n");
     }
 
-    // Core 1 main loop - handle WiFi tasks
+    // Core 1 main loop - handle WiFi tasks AND webhook
     while (true)
     {
         check_wifi_connection();
-        sleep_ms(100); // Don't hog the core
+        
+        // Check if Core 0 requested a webhook POST
+        if (webhook_trigger && wifi_connected)
+        {
+            webhook_trigger = false;  // Clear flag
+            send_webhook_post();
+        }
+        
+        sleep_ms(50);  // Check more frequently for responsiveness
     }
 }
 

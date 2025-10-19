@@ -96,6 +96,24 @@
 #define LWIP_STATS_DISPLAY          1
 #endif
 
+#define LWIP_IPV4                   1
 #define LWIP_IPV6                   0
+
+/* DHCP options */
+#define LWIP_DHCP                   1
+
+/* DNS options */
+#define LWIP_DNS                    1
+
+/* UDP options */
+#define LWIP_UDP                    1
+
+/* ALTCP TLS options */
+#define LWIP_ALTCP                  1
+#define LWIP_ALTCP_TLS              1
+#define LWIP_ALTCP_TLS_MBEDTLS      1
+
+/* Mbed TLS authentication */
+#define ALTCP_MBEDTLS_AUTHMODE      MBEDTLS_SSL_VERIFY_REQUIRED
 
 #endif /* __LWIPOPTS_H__ */
