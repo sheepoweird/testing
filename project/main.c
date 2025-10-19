@@ -19,8 +19,8 @@
 #include "lwip/err.h"
 #include "lwip/ip4_addr.h"
 
-#define WIFI_SSID "Aydil"
-#define WIFI_PASSWORD "12345678"
+#define WIFI_SSID "Zzz"
+#define WIFI_PASSWORD "i6b22krm"
 
 #define HID_BUTTON_PIN 20
 #define WEBHOOK_BUTTON_PIN 21
