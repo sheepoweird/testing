@@ -693,6 +693,15 @@ bool establish_mtls_connection(void)
     u8_t client_key[] = CLIENT_KEY;
 
     printf("[Stage] Creating TLS config\n");
+    printf("  CA cert size: %d bytes\n", sizeof(ca_cert));
+    printf("  Client cert size: %d bytes\n", sizeof(client_cert));
+    printf("  Client key size: %d bytes\n", sizeof(client_key));
+    printf("  Calling altcp_tls_create_config_client_2wayauth...\n");
+
+    // Poll network stack before creating config
+    cyw43_arch_poll();
+    sleep_ms(100);
+
     https_state.tls_config = altcp_tls_create_config_client_2wayauth(
         ca_cert, sizeof(ca_cert),
         client_key, sizeof(client_key),
@@ -700,10 +709,17 @@ bool establish_mtls_connection(void)
         client_cert, sizeof(client_cert)
     );
 
+    printf("  altcp_tls_create_config_client_2wayauth returned\n");
+
+    // Poll again after creating config
+    cyw43_arch_poll();
+
     if (!https_state.tls_config) {
         printf("Failed to create TLS config\n");
         return false;
     }
+
+    printf("[Stage] TLS config created successfully\n");
 
     // Step 3: Create mTLS PCB
     https_state.pcb = altcp_tls_new(https_state.tls_config, IPADDR_TYPE_V4);
@@ -1053,6 +1069,10 @@ void core1_entry(void)
     if (init_wifi())
     {
         printf("Core 1: WiFi ready!\n");
+
+        // Give network stack time to stabilize after WiFi connection
+        printf("Core 1: Waiting for network stack to stabilize...\n");
+        sleep_ms(2000);
 
         // Automatically establish mTLS connection after WiFi is connected
         printf("Core 1: Establishing mTLS connection automatically...\n");
