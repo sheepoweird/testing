@@ -1069,21 +1069,6 @@ void core1_entry(void)
     if (init_wifi())
     {
         printf("Core 1: WiFi ready!\n");
-
-        // Give network stack time to stabilize after WiFi connection
-        printf("Core 1: Waiting for network stack to stabilize...\n");
-        sleep_ms(2000);
-
-        // Automatically establish mTLS connection after WiFi is connected
-        printf("Core 1: Establishing mTLS connection automatically...\n");
-        if (establish_mtls_connection())
-        {
-            printf("Core 1: mTLS connection established and ready!\n");
-        }
-        else
-        {
-            printf("Core 1: mTLS connection failed - will retry on button press\n");
-        }
     }
     else
     {
@@ -1091,25 +1076,27 @@ void core1_entry(void)
     }
 
     // Core 1 main loop - handle WiFi tasks AND webhook
-    bool mtls_established = https_state.handshake_complete;
+    bool mtls_auto_connect_done = false;
 
     while (true)
     {
         check_wifi_connection();
 
-        // If WiFi was reconnected and mTLS is not established, re-establish it
-        if (wifi_connected && !https_state.handshake_complete && !mtls_established)
+        // Automatically establish mTLS connection after WiFi connects (once)
+        if (wifi_connected && !mtls_auto_connect_done && !https_state.handshake_complete)
         {
-            printf("Core 1: WiFi reconnected, re-establishing mTLS...\n");
+            printf("Core 1: Establishing mTLS connection automatically...\n");
             if (establish_mtls_connection())
             {
-                printf("Core 1: mTLS connection re-established!\n");
-                mtls_established = true;
+                printf("Core 1: mTLS connection established and ready!\n");
+                mtls_auto_connect_done = true;
+            }
+            else
+            {
+                printf("Core 1: mTLS connection failed - will retry\n");
+                sleep_ms(5000);  // Wait before retrying
             }
         }
-
-        // Update flag based on current state
-        mtls_established = https_state.handshake_complete;
 
         // Check if Core 0 requested a webhook POST
         if (webhook_trigger && wifi_connected)
