@@ -59,6 +59,8 @@ bool init_sd_card(void);
 bool init_wifi(void);
 bool try_wifi_connect(void);
 void check_wifi_connection(void);
+bool establish_mtls_connection(void);
+void send_post_request(void);
 void send_webhook_post(void);
 void check_webhook_button(void);
 void core1_entry(void);
@@ -84,7 +86,10 @@ bool is_connected = false;
 // HTTPS connection state
 typedef struct {
     struct altcp_tls_config* tls_config;
+    struct altcp_pcb* pcb;  // Persistent PCB for keeping connection alive
+    ip_addr_t server_ip;
     bool connected;
+    bool handshake_complete;
     bool request_sent;
     uint16_t bytes_received;
 } https_state_t;
@@ -636,6 +641,204 @@ void https_err_callback(void* arg, err_t err)
 
 // [------------------------------------------------------------------------- Webhook POST -------------------------------------------------------------------------]
 
+bool establish_mtls_connection(void)
+{
+    if (!wifi_connected)
+    {
+        printf("Cannot establish mTLS - WiFi not connected\n");
+        return false;
+    }
+
+    printf("\n=== Establishing mTLS Connection ===\n");
+
+    // Reset state
+    https_state.connected = false;
+    https_state.handshake_complete = false;
+    https_state.request_sent = false;
+    https_state.bytes_received = 0;
+
+    // Step 1: Resolve DNS
+    https_state.server_ip.addr = 0;
+
+    printf("Resolving %s...\n", WEBHOOK_HOSTNAME);
+
+    err_t dns_err = dns_gethostbyname(WEBHOOK_HOSTNAME, &https_state.server_ip, dns_callback, &https_state.server_ip);
+    printf("[Stage] DNS result: %d, ip=%s\n", dns_err, ip4addr_ntoa(&https_state.server_ip));
+
+    if (dns_err == ERR_INPROGRESS) {
+        // Wait for DNS resolution
+        int timeout = 0;
+        while (https_state.server_ip.addr == 0 && timeout < 100) {
+            sleep_ms(100);
+            timeout++;
+        }
+    }
+
+    if (https_state.server_ip.addr == 0) {
+        printf("DNS resolution failed\n");
+        return false;
+    }
+
+    printf("Resolved to: %s\n", ip4addr_ntoa(&https_state.server_ip));
+
+    // Step 2: Create mTLS configuration
+    u8_t ca_cert[] = CA_CERT;
+    u8_t client_cert[] = CLIENT_CERT;
+    u8_t client_key[] = CLIENT_KEY;
+
+    printf("[Stage] Creating TLS config\n");
+    https_state.tls_config = altcp_tls_create_config_client_2wayauth(
+        ca_cert, sizeof(ca_cert),
+        client_key, sizeof(client_key),
+        NULL, 0,
+        client_cert, sizeof(client_cert)
+    );
+
+    if (!https_state.tls_config) {
+        printf("Failed to create TLS config\n");
+        return false;
+    }
+
+    // Step 3: Create mTLS PCB
+    https_state.pcb = altcp_tls_new(https_state.tls_config, IPADDR_TYPE_V4);
+
+    if (!https_state.pcb) {
+        printf("Failed to create TLS PCB\n");
+        altcp_tls_free_config(https_state.tls_config);
+        https_state.tls_config = NULL;
+        return false;
+    }
+
+    // Step 4: Set SNI hostname
+    int mbedtls_err = mbedtls_ssl_set_hostname(
+        &(((altcp_mbedtls_state_t*)(https_state.pcb->state))->ssl_context),
+        WEBHOOK_HOSTNAME
+    );
+
+    if (mbedtls_err != 0) {
+        printf("Failed to set SNI hostname\n");
+        altcp_close(https_state.pcb);
+        altcp_tls_free_config(https_state.tls_config);
+        https_state.tls_config = NULL;
+        https_state.pcb = NULL;
+        return false;
+    }
+
+    // Step 5: Set up callbacks
+    altcp_arg(https_state.pcb, &https_state);
+    altcp_err(https_state.pcb, https_err_callback);
+    altcp_recv(https_state.pcb, https_recv_callback);
+
+    // Step 6: Connect and perform handshake
+    printf("Connecting to %s:443...\n", WEBHOOK_HOSTNAME);
+
+    err_t connect_err = altcp_connect(https_state.pcb, &https_state.server_ip, 443, https_connected_callback);
+
+    if (connect_err != ERR_OK) {
+        printf("Connection failed: %d\n", connect_err);
+        altcp_close(https_state.pcb);
+        altcp_tls_free_config(https_state.tls_config);
+        https_state.tls_config = NULL;
+        https_state.pcb = NULL;
+        return false;
+    }
+
+    // Wait for connection and handshake - poll lwIP to process packets
+    int timeout = 0;
+    while (!https_state.connected && timeout < 150) {
+        cyw43_arch_poll();  // Let lwIP process packets
+        sleep_ms(100);
+        timeout++;
+    }
+
+    if (!https_state.connected) {
+        printf("Connection/Handshake timeout\n");
+        altcp_close(https_state.pcb);
+        https_state.pcb = NULL;
+        return false;
+    }
+
+    https_state.handshake_complete = true;
+    printf("=== mTLS Handshake Complete! Connection ready. ===\n\n");
+
+    return true;
+}
+
+void send_post_request(void)
+{
+    if (!https_state.connected || !https_state.handshake_complete || !https_state.pcb)
+    {
+        printf("Cannot send POST - mTLS connection not established\n");
+        printf("  Connected: %d, Handshake: %d, PCB: %p\n",
+               https_state.connected, https_state.handshake_complete, https_state.pcb);
+
+        // Try to re-establish connection
+        printf("Attempting to re-establish mTLS connection...\n");
+        if (!establish_mtls_connection()) {
+            printf("Failed to re-establish connection\n");
+            return;
+        }
+    }
+
+    printf("\n=== Sending POST Request ===\n");
+
+    // Reset response state
+    https_state.bytes_received = 0;
+
+    // Prepare JSON body
+    char json_body[256];
+    int body_len = snprintf(json_body, sizeof(json_body),
+                            "{\"button\":\"GP21 pressed\",\"timestamp\":%lu,\"device\":\"Pico-W\"}",
+                            to_ms_since_boot(get_absolute_time()));
+
+    // Prepare HTTP POST request with keep-alive
+    char request[512];
+    int req_len = snprintf(request, sizeof(request),
+                           "POST /%s HTTP/1.1\r\n"
+                           "Host: %s\r\n"
+                           "Content-Type: application/json\r\n"
+                           "Content-Length: %d\r\n"
+                           "Connection: keep-alive\r\n"
+                           "\r\n"
+                           "%s",
+                           WEBHOOK_TOKEN, WEBHOOK_HOSTNAME, body_len, json_body);
+
+    printf("Sending POST data over existing mTLS connection...\n");
+
+    err_t write_err = altcp_write(https_state.pcb, request, req_len, TCP_WRITE_FLAG_COPY);
+
+    if (write_err == ERR_OK) {
+        altcp_output(https_state.pcb);
+
+        printf("Request sent! Waiting for response...\n");
+        https_state.request_sent = true;
+
+        // Wait for response - poll lwIP
+        for (int i = 0; i < 30; i++) {
+            cyw43_arch_poll();
+            sleep_ms(100);
+        }
+
+        // Blink LED to confirm
+        for (int i = 0; i < 6; i++) {
+            gpio_put(LED_PIN, 1);
+            sleep_ms(50);
+            gpio_put(LED_PIN, 0);
+            sleep_ms(50);
+        }
+
+        printf("Received %d bytes\n", https_state.bytes_received);
+    } else {
+        printf("Failed to send request: %d\n", write_err);
+
+        // Connection might be broken, mark for reconnection
+        https_state.connected = false;
+        https_state.handshake_complete = false;
+    }
+
+    printf("=== POST Request complete ===\n\n");
+}
+
 void send_webhook_post(void)
 {
     if (!wifi_connected)
@@ -838,6 +1041,17 @@ void core1_entry(void)
     if (init_wifi())
     {
         printf("Core 1: WiFi ready!\n");
+
+        // Automatically establish mTLS connection after WiFi is connected
+        printf("Core 1: Establishing mTLS connection automatically...\n");
+        if (establish_mtls_connection())
+        {
+            printf("Core 1: mTLS connection established and ready!\n");
+        }
+        else
+        {
+            printf("Core 1: mTLS connection failed - will retry on button press\n");
+        }
     }
     else
     {
@@ -845,17 +1059,33 @@ void core1_entry(void)
     }
 
     // Core 1 main loop - handle WiFi tasks AND webhook
+    bool mtls_established = https_state.handshake_complete;
+
     while (true)
     {
         check_wifi_connection();
-        
+
+        // If WiFi was reconnected and mTLS is not established, re-establish it
+        if (wifi_connected && !https_state.handshake_complete && !mtls_established)
+        {
+            printf("Core 1: WiFi reconnected, re-establishing mTLS...\n");
+            if (establish_mtls_connection())
+            {
+                printf("Core 1: mTLS connection re-established!\n");
+                mtls_established = true;
+            }
+        }
+
+        // Update flag based on current state
+        mtls_established = https_state.handshake_complete;
+
         // Check if Core 0 requested a webhook POST
         if (webhook_trigger && wifi_connected)
         {
             webhook_trigger = false;  // Clear flag
-            send_webhook_post();
+            send_post_request();  // Use new function that reuses connection
         }
-        
+
         sleep_ms(50);  // Check more frequently for responsiveness
     }
 }
