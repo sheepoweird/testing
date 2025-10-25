@@ -64,10 +64,10 @@ void check_webhook_button(void);
 void core1_entry(void);
 
 // Add these new declarations:
-void dns_callback(const char* name, const ip_addr_t* ipaddr, void* arg);
-err_t https_connected_callback(void* arg, struct altcp_pcb* tpcb, err_t err);
-err_t https_recv_callback(void* arg, struct altcp_pcb* tpcb, struct pbuf* p, err_t err);
-void https_err_callback(void* arg, err_t err);
+void dns_callback(const char *name, const ip_addr_t *ipaddr, void *arg);
+err_t https_connected_callback(void *arg, struct altcp_pcb *tpcb, err_t err);
+err_t https_recv_callback(void *arg, struct altcp_pcb *tpcb, struct pbuf *p, err_t err);
+void https_err_callback(void *arg, err_t err);
 
 void log_disconnect_event(void);
 void hid_task(void);
@@ -82,8 +82,9 @@ uint32_t sample_count = 0;
 bool is_connected = false;
 
 // HTTPS connection state
-typedef struct {
-    struct altcp_tls_config* tls_config;
+typedef struct
+{
+    struct altcp_tls_config *tls_config;
     bool connected;
     bool request_sent;
     uint16_t bytes_received;
@@ -482,30 +483,31 @@ bool try_wifi_connect(void)
         WIFI_SSID,
         WIFI_PASSWORD,
         CYW43_AUTH_WPA2_AES_PSK,
-        30000  // 30 second timeout
+        30000 // 30 second timeout
     );
 
     // Check detailed status
     int status = cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA);
     printf("Link status after connect: %d\n", status);
-    
+
     if (result != 0)
     {
         printf("ERROR: Failed to connect (error code: %d)\n", result);
-        
+
         // Detailed error codes
-        switch(result) {
-            case PICO_ERROR_TIMEOUT:
-                printf("  -> Timeout: Check if SSID '%s' exists and is in range\n", WIFI_SSID);
-                break;
-            case PICO_ERROR_GENERIC:
-                printf("  -> Generic error: Check password\n");
-                break;
-            default:
-                printf("  -> Unknown error\n");
-                break;
+        switch (result)
+        {
+        case PICO_ERROR_TIMEOUT:
+            printf("  -> Timeout: Check if SSID '%s' exists and is in range\n", WIFI_SSID);
+            break;
+        case PICO_ERROR_GENERIC:
+            printf("  -> Generic error: Check password\n");
+            break;
+        default:
+            printf("  -> Unknown error\n");
+            break;
         }
-        
+
         wifi_connected = false;
         return false;
     }
@@ -515,13 +517,14 @@ bool try_wifi_connect(void)
     // Print IP address
     extern cyw43_t cyw43_state;
     uint32_t ip = cyw43_state.netif[0].ip_addr.addr;
-    
-    if (ip == 0) {
+
+    if (ip == 0)
+    {
         printf("ERROR: Connected but no IP address assigned!\n");
         wifi_connected = false;
         return false;
     }
-    
+
     printf("IP Address: %d.%d.%d.%d\n",
            ip & 0xFF,
            (ip >> 8) & 0xFF,
@@ -572,65 +575,73 @@ void check_wifi_connection(void)
 
 // [------------------------------------------------------------------------- HTTPS Callbacks -------------------------------------------------------------------------]
 
-void dns_callback(const char* name, const ip_addr_t* ipaddr, void* arg)
+void dns_callback(const char *name, const ip_addr_t *ipaddr, void *arg)
 {
-    if (ipaddr) {
+    if (ipaddr)
+    {
         printf("DNS resolved: %s -> %s\n", name, ip4addr_ntoa(ipaddr));
-        *((ip_addr_t*)arg) = *ipaddr;
-    } else {
+        *((ip_addr_t *)arg) = *ipaddr;
+    }
+    else
+    {
         printf("DNS resolution failed for %s\n", name);
-        ((ip_addr_t*)arg)->addr = 0;
+        ((ip_addr_t *)arg)->addr = 0;
     }
 }
 
-err_t https_connected_callback(void* arg, struct altcp_pcb* tpcb, err_t err)
+err_t https_connected_callback(void *arg, struct altcp_pcb *tpcb, err_t err)
 {
     (void)arg;
-    
-    if (err != ERR_OK) {
+
+    if (err != ERR_OK)
+    {
         printf("HTTPS connection failed: %d\n", err);
         return err;
     }
 
     printf("HTTPS connection established!\n");
     https_state.connected = true;
-    
+
     return ERR_OK;
 }
 
-err_t https_recv_callback(void* arg, struct altcp_pcb* tpcb, struct pbuf* p, err_t err)
+err_t https_recv_callback(void *arg, struct altcp_pcb *tpcb, struct pbuf *p, err_t err)
 {
     (void)arg;
-    
-    if (err != ERR_OK || p == NULL) {
-        if (p) pbuf_free(p);
+
+    if (err != ERR_OK || p == NULL)
+    {
+        if (p)
+            pbuf_free(p);
         return err;
     }
 
     // Print response
-    struct pbuf* current = p;
-    while (current != NULL) {
-        printf("%.*s", current->len, (char*)current->payload);
+    struct pbuf *current = p;
+    while (current != NULL)
+    {
+        printf("%.*s", current->len, (char *)current->payload);
         https_state.bytes_received += current->len;
         current = current->next;
     }
 
     altcp_recved(tpcb, p->tot_len);
     pbuf_free(p);
-    
+
     return ERR_OK;
 }
 
-void https_err_callback(void* arg, err_t err)
+void https_err_callback(void *arg, err_t err)
 {
     (void)arg;
     printf("HTTPS error callback: %d\n", err);
-    
-    if (https_state.tls_config) {
+
+    if (https_state.tls_config)
+    {
         altcp_tls_free_config(https_state.tls_config);
         https_state.tls_config = NULL;
     }
-    
+
     https_state.connected = false;
 }
 
@@ -660,23 +671,26 @@ void send_webhook_post(void)
     err_t dns_err = dns_gethostbyname(WEBHOOK_HOSTNAME, &server_ip, dns_callback, &server_ip);
     printf("[Stage] DNS result: %d, ip=%s\n", dns_err, ip4addr_ntoa(&server_ip));
 
-    if (dns_err == ERR_INPROGRESS) {
+    if (dns_err == ERR_INPROGRESS)
+    {
         // Wait for DNS resolution
         int timeout = 0;
-        while (server_ip.addr == 0 && timeout < 100) {
+        while (server_ip.addr == 0 && timeout < 100)
+        {
             sleep_ms(100);
             timeout++;
         }
     }
 
-    if (server_ip.addr == 0) {
+    if (server_ip.addr == 0)
+    {
         printf("DNS resolution failed\n");
         return;
     }
 
     printf("Resolved to: %s\n", ip4addr_ntoa(&server_ip));
 
-    // Step 2: Create mTLS configuration    
+    // Step 2: Create mTLS configuration
     u8_t ca_cert[] = CA_CERT;
     u8_t client_cert[] = CLIENT_CERT;
     // static const u8_t client_key[] = CLIENT_KEY;
@@ -685,23 +699,22 @@ void send_webhook_post(void)
     printf("[Stage] Creating TLS config\n");
     // https_state.tls_config = altcp_tls_create_config_client(ca_cert, sizeof(ca_cert)); //code responsible for one way handshake
     https_state.tls_config = altcp_tls_create_config_client_2wayauth(
-    ca_cert, sizeof(ca_cert),
-    client_key, sizeof(client_key),
-    NULL, 0,                          // or password + length if encrypted key
-    client_cert, sizeof(client_cert)
-    );
+        ca_cert, sizeof(ca_cert),
+        client_key, sizeof(client_key),
+        NULL, 0, // or password + length if encrypted key
+        client_cert, sizeof(client_cert));
 
-
-
-    if (!https_state.tls_config) {
+    if (!https_state.tls_config)
+    {
         printf("Failed to create TLS config\n");
         return;
     }
 
     // Step 3: Create mTLS PCB
-    struct altcp_pcb* pcb = altcp_tls_new(https_state.tls_config, IPADDR_TYPE_V4);
+    struct altcp_pcb *pcb = altcp_tls_new(https_state.tls_config, IPADDR_TYPE_V4);
 
-    if (!pcb) {
+    if (!pcb)
+    {
         printf("Failed to create TLS PCB\n");
         altcp_tls_free_config(https_state.tls_config);
         https_state.tls_config = NULL;
@@ -710,11 +723,11 @@ void send_webhook_post(void)
 
     // Step 4: Set SNI hostname
     int mbedtls_err = mbedtls_ssl_set_hostname(
-        &(((altcp_mbedtls_state_t*)(pcb->state))->ssl_context),
-        WEBHOOK_HOSTNAME
-    );
+        &(((altcp_mbedtls_state_t *)(pcb->state))->ssl_context),
+        WEBHOOK_HOSTNAME);
 
-    if (mbedtls_err != 0) {
+    if (mbedtls_err != 0)
+    {
         printf("Failed to set SNI hostname\n");
         altcp_close(pcb);
         altcp_tls_free_config(https_state.tls_config);
@@ -729,10 +742,11 @@ void send_webhook_post(void)
 
     // Step 6: Connect
     printf("Connecting to %s:443...\n", WEBHOOK_HOSTNAME);
-    
+
     err_t connect_err = altcp_connect(pcb, &server_ip, 443, https_connected_callback);
 
-    if (connect_err != ERR_OK) {
+    if (connect_err != ERR_OK)
+    {
         printf("Connection failed: %d\n", connect_err);
         altcp_close(pcb);
         altcp_tls_free_config(https_state.tls_config);
@@ -742,13 +756,15 @@ void send_webhook_post(void)
 
     // Wait for connection - poll lwIP to process packets
     int timeout = 0;
-    while (!https_state.connected && timeout < 150) {
-        cyw43_arch_poll();  // Let lwIP process packets
+    while (!https_state.connected && timeout < 150)
+    {
+        cyw43_arch_poll(); // Let lwIP process packets
         sleep_ms(100);
         timeout++;
     }
 
-    if (!https_state.connected) {
+    if (!https_state.connected)
+    {
         printf("Connection timeout\n");
         altcp_close(pcb);
         return;
@@ -772,23 +788,26 @@ void send_webhook_post(void)
                            WEBHOOK_TOKEN, WEBHOOK_HOSTNAME, body_len, json_body);
 
     printf("Sending HTTPS request...\n");
-    
+
     err_t write_err = altcp_write(pcb, request, req_len, TCP_WRITE_FLAG_COPY);
 
-    if (write_err == ERR_OK) {
+    if (write_err == ERR_OK)
+    {
         altcp_output(pcb);
-        
+
         printf("Request sent! Waiting for response...\n");
         https_state.request_sent = true;
 
         // Wait for response - poll lwIP
-        for (int i = 0; i < 30; i++) {
+        for (int i = 0; i < 30; i++)
+        {
             cyw43_arch_poll();
             sleep_ms(100);
         }
 
         // Blink LED to confirm
-        for (int i = 0; i < 6; i++) {
+        for (int i = 0; i < 6; i++)
+        {
             gpio_put(LED_PIN, 1);
             sleep_ms(50);
             gpio_put(LED_PIN, 0);
@@ -796,7 +815,9 @@ void send_webhook_post(void)
         }
 
         printf("\nReceived %d bytes\n", https_state.bytes_received);
-    } else {
+    }
+    else
+    {
         printf("Failed to send request: %d\n", write_err);
     }
 
@@ -819,7 +840,7 @@ void check_webhook_button(void)
         if (now - debounce_time > 200)
         {
             printf("\n>>> GP21 Button Pressed! <<<\n");
-            webhook_trigger = true;  // Signal Core 1 to send
+            webhook_trigger = true; // Signal Core 1 to send
             debounce_time = now;
         }
     }
@@ -848,15 +869,15 @@ void core1_entry(void)
     while (true)
     {
         check_wifi_connection();
-        
+
         // Check if Core 0 requested a webhook POST
         if (webhook_trigger && wifi_connected)
         {
-            webhook_trigger = false;  // Clear flag
+            webhook_trigger = false; // Clear flag
             send_webhook_post();
         }
-        
-        sleep_ms(50);  // Check more frequently for responsiveness
+
+        sleep_ms(50); // Check more frequently for responsiveness
     }
 }
 
