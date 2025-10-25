@@ -25,8 +25,8 @@
 #include "mbedtls/ssl.h"
 #include "https_config.h"
 
-#define WIFI_SSID "Zzz"
-#define WIFI_PASSWORD "i6b22krm"
+#define WIFI_SSID "Anthrooo"
+#define WIFI_PASSWORD "abcd1234"
 
 #define HID_BUTTON_PIN 20
 #define WEBHOOK_BUTTON_PIN 21
@@ -638,6 +638,8 @@ void https_err_callback(void* arg, err_t err)
 
 void send_webhook_post(void)
 {
+    printf("Start POST...\n");
+    fflush(stdout);
     if (!wifi_connected)
     {
         printf("Cannot send POST - WiFi not connected\n");
@@ -656,8 +658,9 @@ void send_webhook_post(void)
     server_ip.addr = 0;
 
     printf("Resolving %s...\n", WEBHOOK_HOSTNAME);
-    
+    printf("[Stage] DNS start\n");
     err_t dns_err = dns_gethostbyname(WEBHOOK_HOSTNAME, &server_ip, dns_callback, &server_ip);
+    printf("[Stage] DNS result: %d, ip=%s\n", dns_err, ip4addr_ntoa(&server_ip));
 
     if (dns_err == ERR_INPROGRESS) {
         // Wait for DNS resolution
@@ -675,17 +678,29 @@ void send_webhook_post(void)
 
     printf("Resolved to: %s\n", ip4addr_ntoa(&server_ip));
 
-    // Step 2: Create TLS configuration
+    // Step 2: Create mTLS configuration    
     u8_t ca_cert[] = CA_CERT;
-    
-    https_state.tls_config = altcp_tls_create_config_client(ca_cert, sizeof(ca_cert));
+    u8_t client_cert[] = CLIENT_CERT;
+    // static const u8_t client_key[] = CLIENT_KEY;
+    u8_t client_key[] = CLIENT_KEY;
+
+    printf("[Stage] Creating TLS config\n");
+    // https_state.tls_config = altcp_tls_create_config_client(ca_cert, sizeof(ca_cert)); //code responsible for one way handshake
+    https_state.tls_config = altcp_tls_create_config_client_2wayauth(
+    ca_cert, sizeof(ca_cert),
+    client_key, sizeof(client_key),
+    NULL, 0,                          // or password + length if encrypted key
+    client_cert, sizeof(client_cert)
+    );
+
+
 
     if (!https_state.tls_config) {
         printf("Failed to create TLS config\n");
         return;
     }
 
-    // Step 3: Create TLS PCB
+    // Step 3: Create mTLS PCB
     struct altcp_pcb* pcb = altcp_tls_new(https_state.tls_config, IPADDR_TYPE_V4);
 
     if (!pcb) {
