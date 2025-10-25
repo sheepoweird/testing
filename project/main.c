@@ -657,29 +657,35 @@ bool establish_mtls_connection(void)
     https_state.request_sent = false;
     https_state.bytes_received = 0;
 
-    // Step 1: Resolve DNS
+    // Step 1: Resolve DNS or parse IP address
     https_state.server_ip.addr = 0;
 
     printf("Resolving %s...\n", WEBHOOK_HOSTNAME);
 
-    err_t dns_err = dns_gethostbyname(WEBHOOK_HOSTNAME, &https_state.server_ip, dns_callback, &https_state.server_ip);
-    printf("[Stage] DNS result: %d, ip=%s\n", dns_err, ip4addr_ntoa(&https_state.server_ip));
+    // Try to parse as IP address first (handles cases like "192.168.96.117")
+    if (ipaddr_aton(WEBHOOK_HOSTNAME, &https_state.server_ip)) {
+        printf("Using direct IP address: %s\n", ip4addr_ntoa(&https_state.server_ip));
+    } else {
+        // It's a hostname, use DNS
+        err_t dns_err = dns_gethostbyname(WEBHOOK_HOSTNAME, &https_state.server_ip, dns_callback, &https_state.server_ip);
+        printf("[Stage] DNS result: %d\n", dns_err);
 
-    if (dns_err == ERR_INPROGRESS) {
-        // Wait for DNS resolution
-        int timeout = 0;
-        while (https_state.server_ip.addr == 0 && timeout < 100) {
-            sleep_ms(100);
-            timeout++;
+        if (dns_err == ERR_INPROGRESS) {
+            // Wait for DNS resolution
+            int timeout = 0;
+            while (https_state.server_ip.addr == 0 && timeout < 100) {
+                sleep_ms(100);
+                timeout++;
+            }
         }
-    }
 
-    if (https_state.server_ip.addr == 0) {
-        printf("DNS resolution failed\n");
-        return false;
-    }
+        if (https_state.server_ip.addr == 0) {
+            printf("DNS resolution failed\n");
+            return false;
+        }
 
-    printf("Resolved to: %s\n", ip4addr_ntoa(&https_state.server_ip));
+        printf("Resolved to: %s\n", ip4addr_ntoa(&https_state.server_ip));
+    }
 
     // Step 2: Create mTLS configuration
     u8_t ca_cert[] = CA_CERT;
@@ -854,30 +860,36 @@ void send_webhook_post(void)
     https_state.request_sent = false;
     https_state.bytes_received = 0;
 
-    // Step 1: Resolve DNS
+    // Step 1: Resolve DNS or parse IP address
     ip_addr_t server_ip;
     server_ip.addr = 0;
 
     printf("Resolving %s...\n", WEBHOOK_HOSTNAME);
 
-    err_t dns_err = dns_gethostbyname(WEBHOOK_HOSTNAME, &server_ip, dns_callback, &server_ip);
-    printf("[Stage] DNS result: %d, ip=%s\n", dns_err, ip4addr_ntoa(&server_ip));
+    // Try to parse as IP address first (handles cases like "192.168.96.117")
+    if (ipaddr_aton(WEBHOOK_HOSTNAME, &server_ip)) {
+        printf("Using direct IP address: %s\n", ip4addr_ntoa(&server_ip));
+    } else {
+        // It's a hostname, use DNS
+        err_t dns_err = dns_gethostbyname(WEBHOOK_HOSTNAME, &server_ip, dns_callback, &server_ip);
+        printf("[Stage] DNS result: %d\n", dns_err);
 
-    if (dns_err == ERR_INPROGRESS) {
-        // Wait for DNS resolution
-        int timeout = 0;
-        while (server_ip.addr == 0 && timeout < 100) {
-            sleep_ms(100);
-            timeout++;
+        if (dns_err == ERR_INPROGRESS) {
+            // Wait for DNS resolution
+            int timeout = 0;
+            while (server_ip.addr == 0 && timeout < 100) {
+                sleep_ms(100);
+                timeout++;
+            }
         }
-    }
 
-    if (server_ip.addr == 0) {
-        printf("DNS resolution failed\n");
-        return;
-    }
+        if (server_ip.addr == 0) {
+            printf("DNS resolution failed\n");
+            return;
+        }
 
-    printf("Resolved to: %s\n", ip4addr_ntoa(&server_ip));
+        printf("Resolved to: %s\n", ip4addr_ntoa(&server_ip));
+    }
 
     // Step 2: Create mTLS configuration    
     u8_t ca_cert[] = CA_CERT;
