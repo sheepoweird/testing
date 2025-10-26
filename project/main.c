@@ -25,8 +25,8 @@
 #include "mbedtls/ssl.h"
 #include "https_config.h"
 
-#define WIFI_SSID "SINGTEL-93F8"
-#define WIFI_PASSWORD "9gqksHLu9Eq4"
+#define WIFI_SSID "Witwicky"
+#define WIFI_PASSWORD "E@AFjpms7"
 
 #define HID_BUTTON_PIN 20
 #define WEBHOOK_BUTTON_PIN 21
@@ -671,7 +671,15 @@ void send_webhook_post_with_cleanup(health_data_t* data)
 
     // Step 2: Create TLS Config (fresh for each connection)
     u8_t ca_cert[] = CA_CERT;
-    https_state.tls_config = altcp_tls_create_config_client(ca_cert, sizeof(ca_cert));
+    u8_t client_cert[] = CLIENT_CERT;
+    u8_t client_key[] = CLIENT_KEY;
+    
+    https_state.tls_config = altcp_tls_create_config_client_2wayauth(
+        ca_cert, sizeof(ca_cert),
+        client_key, sizeof(client_key),
+        NULL, 0,
+        client_cert, sizeof(client_cert)
+    );
 
     if (!https_state.tls_config) {
         printf("TLS cfg fail\n");
