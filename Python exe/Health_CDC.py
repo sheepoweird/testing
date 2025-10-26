@@ -18,16 +18,15 @@ class HealthMonitorPico:
         self.start_time = time.time()
         self.sample_count = 0
         self.serial_connection = None
+        self.write_timeout_count = 0
+        self.max_consecutive_timeouts = 3
 
         # Determine base directory (works for .py and PyInstaller .exe)
         if getattr(sys, 'frozen', False):
-            # Running as compiled executable
             base_dir = os.path.dirname(sys.executable)
         else:
-            # Running as Python script
             base_dir = os.path.dirname(os.path.abspath(__file__))
 
-        # If a relative filename was given, resolve it under the base directory
         if not os.path.isabs(log_file):
             self.log_file = os.path.join(base_dir, log_file)
         else:
@@ -55,7 +54,6 @@ class HealthMonitorPico:
             if 'USB' in port.description.upper() and 'Serial' in port.description:
                 usb_ports.append(port)
 
-        # Return first USB port if found
         if usb_ports:
             return usb_ports[0].device
 
@@ -78,16 +76,29 @@ class HealthMonitorPico:
 
         try:
             print(f"Opening {self.pico_port}...")
-            self.serial_connection = serial.Serial(self.pico_port, 115200, timeout=1)
-            time.sleep(2)  # Wait for connection to stabilize
+            # Increased write timeout and added better buffering
+            self.serial_connection = serial.Serial(
+                self.pico_port,
+                115200,
+                timeout=1,
+                write_timeout=2.0,  # Increased from default
+                # Use larger buffers
+                xonxoff=False,
+                rtscts=False,
+                dsrdtr=False
+            )
+            time.sleep(2)
             print(f"✓ Connected to {self.pico_port}\n")
 
             # Read and display Pico startup messages
             time.sleep(0.5)
             while self.serial_connection.in_waiting:
-                line = self.serial_connection.readline().decode('utf-8', errors='ignore').strip()
-                if line:
-                    print(f"Pico: {line}")
+                try:
+                    line = self.serial_connection.readline().decode('utf-8', errors='ignore').strip()
+                    if line:
+                        print(f"Pico: {line}")
+                except:
+                    pass
 
             return True
 
@@ -103,7 +114,6 @@ class HealthMonitorPico:
     def get_cpu_temperature(self):
         """Try to get CPU temperature (platform dependent)"""
         try:
-            # Linux - try different thermal zones
             thermal_paths = [
                 "/sys/class/thermal/thermal_zone0/temp",
                 "/sys/class/thermal/thermal_zone1/temp",
@@ -122,7 +132,6 @@ class HealthMonitorPico:
                 except:
                     continue
 
-            # Windows - try psutil sensors (if available)
             if hasattr(psutil, 'sensors_temperatures'):
                 temps = psutil.sensors_temperatures()
                 for name, entries in temps.items():
@@ -169,7 +178,6 @@ class HealthMonitorPico:
             network_speed_in = max(0, (network_io.bytes_recv - prev_net['bytes_recv']) / time_diff / 1024)
             network_speed_out = max(0, (network_io.bytes_sent - prev_net['bytes_sent']) / time_diff / 1024)
 
-        # Store current network stats for next calculation
         if network_io:
             self.network_history.append({
                 'bytes_recv': network_io.bytes_recv,
@@ -193,30 +201,66 @@ class HealthMonitorPico:
         return pico_data
 
     def send_to_pico(self, data):
-        """Send JSON data to Pico"""
+        """Send JSON data to Pico with improved error handling"""
         if not self.serial_connection:
             return False
 
         try:
             json_data = json.dumps(data)
+
+            # Check if there's too much data waiting to be read
+            # This indicates the Pico might be busy
+            if self.serial_connection.in_waiting > 1000:
+                # Clear some of the buffer
+                try:
+                    self.serial_connection.read(self.serial_connection.in_waiting)
+                except:
+                    pass
+
             self.serial_connection.write(json_data.encode('utf-8'))
             self.serial_connection.write(b'\n')
             self.serial_connection.flush()
+
+            # Reset timeout counter on success
+            self.write_timeout_count = 0
             return True
+
+        except serial.SerialTimeoutException:
+            self.write_timeout_count += 1
+            print(f"\n⚠️  Write timeout ({self.write_timeout_count}/{self.max_consecutive_timeouts})")
+
+            if self.write_timeout_count >= self.max_consecutive_timeouts:
+                print("❌ Too many consecutive timeouts. Pico may be busy with network operations.")
+                print("   Continuing to monitor...")
+                # Reset counter but continue
+                self.write_timeout_count = 0
+
+            return False
+
         except Exception as e:
             print(f"❌ Error sending to Pico: {e}")
             return False
 
-    def read_pico_response(self):
-        """Read any response from Pico"""
+    def read_pico_response(self, timeout_ms=100):
+        """Read any response from Pico with timeout"""
         if not self.serial_connection:
             return
 
+        start_time = time.time()
         try:
             while self.serial_connection.in_waiting:
-                line = self.serial_connection.readline().decode('utf-8', errors='ignore').strip()
-                if line:
-                    print(f"  Pico: {line}")
+                # Don't spend too long reading
+                if (time.time() - start_time) * 1000 > timeout_ms:
+                    break
+
+                try:
+                    line = self.serial_connection.readline().decode('utf-8', errors='ignore').strip()
+                    if line:
+                        # Only print non-compact status lines
+                        if not line.startswith('[') or 'Button' in line or 'POST' in line:
+                            print(f"  Pico: {line}")
+                except:
+                    break
         except:
             pass
 
@@ -225,14 +269,11 @@ class HealthMonitorPico:
         try:
             with open(self.log_file, 'a', encoding='utf-8') as f:
                 timestamp = datetime.now().isoformat()
-                # Write formatted line
                 f.write(f"[{self.sample_count:04d}] {timestamp} | ")
                 f.write(f"CPU={data['cpu']:5.1f}% | RAM={data['memory']:5.1f}% | ")
                 f.write(f"DISK={data['disk']:5.1f}% | TEMP={data['cpu_temp'] or 0:5.1f}°C | ")
                 f.write(f"NET=↓{data['net_in']:6.1f}↑{data['net_out']:6.1f} KB/s | ")
                 f.write(f"PROC={data['processes']}\n")
-
-                # Also write JSON for easy parsing
                 f.write(f"JSON: {json.dumps(data)}\n")
                 f.write("-" * 80 + "\n")
                 f.flush()
@@ -253,7 +294,6 @@ class HealthMonitorPico:
         print(f"Runtime: {(time.time() - self.start_time) / 60:.1f} minutes")
         print("-" * 60)
 
-        # Display health metrics
         cpu = data['cpu']
         mem = data['memory']
         disk = data['disk']
@@ -268,9 +308,13 @@ class HealthMonitorPico:
         print(f"NET:  ↓{data['net_in']:6.1f} KB/s | ↑{data['net_out']:6.1f} KB/s")
         print(f"PROC: {data['processes']} processes")
 
+        if self.write_timeout_count > 0:
+            print(f"\n⚠️  Write timeouts: {self.write_timeout_count}")
+
         print("-" * 60)
         print(f"JSON sent: {json.dumps(data)[:80]}...")
         print("\nPress Ctrl+C to stop monitoring...")
+        print("\nNote: Pico may be slow to respond during webhook POSTs")
 
     def run(self):
         """Main monitoring loop"""
@@ -279,7 +323,6 @@ class HealthMonitorPico:
         print("=" * 60)
         print()
 
-        # Connect to Pico
         if not self.connect_to_pico():
             return
 
@@ -310,17 +353,16 @@ class HealthMonitorPico:
                 # Log to file
                 self.log_to_file(health_data)
 
-                # Send to Pico
-                if self.send_to_pico(health_data):
-                    # Display status
-                    self.print_status(health_data)
+                # Send to Pico (non-blocking, continues even on timeout)
+                send_success = self.send_to_pico(health_data)
 
-                    # Read any response from Pico (shown on cleared screen)
+                # Display status
+                self.print_status(health_data)
+
+                # Read any response from Pico (with short timeout)
+                if send_success:
                     time.sleep(0.1)
-                    self.read_pico_response()
-                else:
-                    print("Failed to send data to Pico")
-                    break
+                    self.read_pico_response(timeout_ms=200)
 
                 # Wait for next interval
                 time.sleep(self.interval)
@@ -347,7 +389,10 @@ class HealthMonitorPico:
             pass
 
         if self.serial_connection:
-            self.serial_connection.close()
+            try:
+                self.serial_connection.close()
+            except:
+                pass
 
         print(f"📊 Collected {self.sample_count} samples")
         print(f"📄 Log saved to: {os.path.abspath(self.log_file)}")
