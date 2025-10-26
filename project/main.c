@@ -25,8 +25,8 @@
 #include "mbedtls/ssl.h"
 #include "https_config.h"
 
-#define WIFI_SSID "Anthrooo"
-#define WIFI_PASSWORD "abcd1234"
+#define WIFI_SSID "SINGTEL-93F8"
+#define WIFI_PASSWORD "9gqksHLu9Eq4"
 
 #define HID_BUTTON_PIN 20
 #define WEBHOOK_BUTTON_PIN 21
@@ -34,6 +34,12 @@
 #define RX_BUFFER_SIZE 512
 #define DATA_TIMEOUT_MS 10000
 #define MAX_SEQ 512
+
+// ============================================
+// AUTO-HID TRIGGER CONFIGURATION
+// Comment out the line below to DISABLE auto-trigger
+#define AUTO_TRIGGER_HID
+// ============================================
 
 static FATFS fs;
 static bool sd_mounted = false;
@@ -59,15 +65,15 @@ bool init_sd_card(void);
 bool init_wifi(void);
 bool try_wifi_connect(void);
 void check_wifi_connection(void);
-void send_webhook_post(void);
+void send_webhook_post(int num_requests);
 void check_webhook_button(void);
 void core1_entry(void);
 
 // Add these new declarations:
-void dns_callback(const char *name, const ip_addr_t *ipaddr, void *arg);
-err_t https_connected_callback(void *arg, struct altcp_pcb *tpcb, err_t err);
-err_t https_recv_callback(void *arg, struct altcp_pcb *tpcb, struct pbuf *p, err_t err);
-void https_err_callback(void *arg, err_t err);
+void dns_callback(const char* name, const ip_addr_t* ipaddr, void* arg);
+err_t https_connected_callback(void* arg, struct altcp_pcb* tpcb, err_t err);
+err_t https_recv_callback(void* arg, struct altcp_pcb* tpcb, struct pbuf* p, err_t err);
+void https_err_callback(void* arg, err_t err);
 
 void log_disconnect_event(void);
 void hid_task(void);
@@ -82,9 +88,8 @@ uint32_t sample_count = 0;
 bool is_connected = false;
 
 // HTTPS connection state
-typedef struct
-{
-    struct altcp_tls_config *tls_config;
+typedef struct {
+    struct altcp_tls_config* tls_config;
     bool connected;
     bool request_sent;
     uint16_t bytes_received;
@@ -94,6 +99,11 @@ static https_state_t https_state = {0};
 
 // Add this new variable for inter-core communication:
 static volatile bool webhook_trigger = false;
+
+// Auto-trigger variables
+static volatile bool wifi_fully_connected = false;  // Set by Core 1 when WiFi has IP
+static bool usb_mounted = false;                     // Set when USB mounts
+static bool auto_trigger_executed = false;           // Prevents multiple triggers
 
 int main(void)
 {
@@ -133,6 +143,13 @@ int main(void)
     multicore_launch_core1(core1_entry);
 
     sleep_ms(2000); // Give Core 1 time to init WiFi
+
+#ifdef AUTO_TRIGGER_HID
+    printf("\n*** AUTO-TRIGGER ENABLED ***\n");
+    printf("Waiting for WiFi connection + USB mount, then 15 sec delay...\n");
+#else
+    printf("\n*** AUTO-TRIGGER DISABLED ***\n");
+#endif
 
     printf("\nCore 0: System ready - entering main loop\n");
 
@@ -193,8 +210,17 @@ int main(void)
 
 // [------------------------------------------------------------------------- MSC -------------------------------------------------------------------------]
 
-void tud_mount_cb(void) {}
-void tud_umount_cb(void) {}
+void tud_mount_cb(void) 
+{
+    usb_mounted = true;
+    printf("*** USB MOUNTED ***\n");
+}
+
+void tud_umount_cb(void) 
+{
+    usb_mounted = false;
+}
+
 void tud_suspend_cb(bool remote_wakeup_en) { (void)remote_wakeup_en; }
 void tud_resume_cb(void) {}
 
@@ -271,12 +297,38 @@ void hid_task(void)
     static uint32_t start_ms = 0;
     static int state = 0;
     static int seq_index = 0;
+    static uint32_t auto_trigger_start_time = 0;
 
     if (board_millis() - start_ms < interval_ms)
         return;
     start_ms = board_millis();
 
     uint32_t const btn = !gpio_get(HID_BUTTON_PIN);
+
+#ifdef AUTO_TRIGGER_HID
+    // Auto-trigger: Wait for BOTH WiFi (with IP) AND USB mount, then 15 second delay
+    if (wifi_fully_connected && usb_mounted && !auto_trigger_executed && state == 0)
+    {
+        if (auto_trigger_start_time == 0)
+        {
+            // Both are ready, start countdown
+            auto_trigger_start_time = board_millis();
+            printf("\n*** WIFI + USB READY - 15 second countdown started ***\n");
+        }
+        else if ((board_millis() - auto_trigger_start_time) >= 15000)
+        {
+            // 15 seconds passed, trigger HID
+            printf("\n*** AUTO-TRIGGERING HID SEQUENCE ***\n");
+            if (tud_hid_ready())
+            {
+                build_sequence();
+                seq_index = 0;
+                state = 1;
+                auto_trigger_executed = true;
+            }
+        }
+    }
+#endif
 
     switch (state)
     {
@@ -296,23 +348,12 @@ void hid_task(void)
 
             if (act.key || act.modifier)
             {
-                uint8_t kc[6] = {act.key, 0, 0, 0, 0, 0};
-                int pack_count = 1;
-
-                while (pack_count < 6 && seq_index < seq_len &&
-                       sequence[seq_index].key &&
-                       sequence[seq_index].modifier == act.modifier)
-                {
-                    kc[pack_count] = sequence[seq_index].key;
-                    pack_count++;
-                    seq_index++;
-                }
-
-                tud_hid_keyboard_report(REPORT_ID_KEYBOARD, act.modifier, kc);
+                uint8_t keys[6] = {act.key, 0, 0, 0, 0, 0};
+                tud_hid_keyboard_report(HID_ITF_PROTOCOL_KEYBOARD, act.modifier, keys);
             }
             else
             {
-                tud_hid_keyboard_report(REPORT_ID_KEYBOARD, 0, NULL);
+                tud_hid_keyboard_report(HID_ITF_PROTOCOL_KEYBOARD, 0, NULL);
             }
         }
         else if (seq_index >= seq_len)
@@ -322,17 +363,13 @@ void hid_task(void)
         break;
 
     case 2:
-        if (!btn)
+        if (tud_hid_ready())
+        {
+            tud_hid_keyboard_report(HID_ITF_PROTOCOL_KEYBOARD, 0, NULL);
             state = 0;
+        }
         break;
     }
-}
-
-void tud_hid_report_complete_cb(uint8_t instance, uint8_t const *report, uint16_t len)
-{
-    (void)instance;
-    (void)report;
-    (void)len;
 }
 
 uint16_t tud_hid_get_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_t report_type, uint8_t *buffer, uint16_t reqlen)
@@ -354,68 +391,176 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_
     (void)bufsize;
 }
 
-// [------------------------------------------------------------------------- CDC -------------------------------------------------------------------------]
+// [------------------------------------------------------------------------- LED Blinking -------------------------------------------------------------------------]
+
+enum
+{
+    BLINK_NOT_MOUNTED = 250,
+    BLINK_MOUNTED = 1000,
+    BLINK_SUSPENDED = 2500,
+};
+
+static uint32_t blink_interval_ms = BLINK_NOT_MOUNTED;
+
+void led_blinking_task(void)
+{
+    static uint32_t start_ms = 0;
+    static bool led_state = false;
+
+    if (board_millis() - start_ms < blink_interval_ms)
+        return;
+    start_ms = board_millis();
+
+    board_led_write(led_state);
+    led_state = !led_state;
+}
+
+// [------------------------------------------------------------------------- WiFi -------------------------------------------------------------------------]
+
+static bool wifi_connected = false;
+static uint32_t last_wifi_check = 0;
+static const uint32_t WIFI_CHECK_INTERVAL_MS = 10000;  // Check every 10 seconds instead of 5
+
+bool init_wifi(void)
+{
+    printf("WiFi: Initializing CYW43 arch...\n");
+
+    if (cyw43_arch_init())
+    {
+        printf("WiFi: CYW43 arch init FAILED\n");
+        return false;
+    }
+
+    printf("WiFi: CYW43 arch initialized\n");
+    cyw43_arch_enable_sta_mode();
+    printf("WiFi: Station mode enabled\n");
+
+    return try_wifi_connect();
+}
+
+bool try_wifi_connect(void)
+{
+    printf("WiFi: Connecting to SSID: %s\n", WIFI_SSID);
+
+    int result = cyw43_arch_wifi_connect_timeout_ms(
+        WIFI_SSID,
+        WIFI_PASSWORD,
+        CYW43_AUTH_WPA2_AES_PSK,
+        30000);
+
+    if (result == 0)
+    {
+        printf("WiFi: Connected successfully!\n");
+        wifi_connected = true;
+
+        // Get and print IP address
+        struct netif *netif = &cyw43_state.netif[CYW43_ITF_STA];
+        printf("WiFi: IP Address: %s\n", ip4addr_ntoa(netif_ip4_addr(netif)));
+
+        // Signal that WiFi is FULLY ready (has IP address)
+        wifi_fully_connected = true;
+        printf("*** WIFI FULLY CONNECTED ***\n");
+
+        return true;
+    }
+    else
+    {
+        printf("WiFi: Connection failed (error: %d)\n", result);
+        wifi_connected = false;
+        return false;
+    }
+}
+
+void check_wifi_connection(void)
+{
+    uint32_t now = to_ms_since_boot(get_absolute_time());
+
+    if (now - last_wifi_check < WIFI_CHECK_INTERVAL_MS)
+    {
+        return;
+    }
+
+    last_wifi_check = now;
+
+    int status = cyw43_wifi_link_status(&cyw43_state, CYW43_ITF_STA);
+
+    bool was_connected = wifi_connected;
+    
+    // Only mark as disconnected if truly down/failed
+    if (status == CYW43_LINK_DOWN || status == CYW43_LINK_FAIL || 
+        status == CYW43_LINK_NONET || status == CYW43_LINK_BADAUTH)
+    {
+        wifi_connected = false;
+    }
+    else if (status == CYW43_LINK_UP)
+    {
+        wifi_connected = true;
+    }
+    // Ignore transient states like NOIP, JOIN
+
+    // Handle reconnection
+    if (!was_connected && wifi_connected)
+    {
+        printf("WiFi: Reconnected\n");
+    }
+    else if (was_connected && !wifi_connected)
+    {
+        printf("WiFi: Connection lost, attempting reconnect...\n");
+        wifi_fully_connected = false;  // Reset the fully connected flag
+        try_wifi_connect();
+    }
+    else if (!wifi_connected && !was_connected)
+    {
+        // Never connected or still disconnected - keep trying
+        printf("WiFi: Not connected, retrying...\n");
+        try_wifi_connect();
+    }
+}
+
+// [------------------------------------------------------------------------- JSON Processing -------------------------------------------------------------------------]
 
 void process_json_data(char *json)
 {
-    if (!json || strlen(json) == 0)
-        return;
+    last_data_time = to_ms_since_boot(get_absolute_time());
 
-    uint32_t receive_time = to_ms_since_boot(get_absolute_time());
-    health_data_t new_data = {0};
+    char *cpu_str = strstr(json, "\"cpu\":");
+    char *mem_str = strstr(json, "\"memory\":");
+    char *disk_str = strstr(json, "\"disk\":");
+    char *temp_str = strstr(json, "\"cpu_temp\":");
+    char *net_in_str = strstr(json, "\"net_in\":");
+    char *net_out_str = strstr(json, "\"net_out\":");
+    char *proc_str = strstr(json, "\"processes\":");
 
-    char *cpu_ptr = strstr(json, "\"cpu\":");
-    char *mem_ptr = strstr(json, "\"memory\":");
-    char *disk_ptr = strstr(json, "\"disk\":");
-    char *temp_ptr = strstr(json, "\"cpu_temp\":");
-    char *net_in_ptr = strstr(json, "\"net_in\":");
-    char *net_out_ptr = strstr(json, "\"net_out\":");
-    char *proc_ptr = strstr(json, "\"processes\":");
+    bool all_found = cpu_str && mem_str && disk_str && temp_str &&
+                     net_in_str && net_out_str && proc_str;
 
-    if (cpu_ptr)
-        new_data.cpu = atof(cpu_ptr + 6);
-    if (mem_ptr)
-        new_data.memory = atof(mem_ptr + 9);
-    if (disk_ptr)
-        new_data.disk = atof(disk_ptr + 7);
-    if (temp_ptr)
+    if (all_found)
     {
-        new_data.cpu_temp = atof(temp_ptr + 11);
-        if (strstr(temp_ptr + 11, "null"))
-            new_data.cpu_temp = 0;
-    }
-    if (net_in_ptr)
-        new_data.net_in = atof(net_in_ptr + 9);
-    if (net_out_ptr)
-        new_data.net_out = atof(net_out_ptr + 10);
-    if (proc_ptr)
-        new_data.processes = atoi(proc_ptr + 12);
-
-    if (cpu_ptr && mem_ptr && disk_ptr)
-    {
-        current_health = new_data;
+        current_health.cpu = atof(cpu_str + 6);
+        current_health.memory = atof(mem_str + 9);
+        current_health.disk = atof(disk_str + 7);
+        current_health.cpu_temp = atof(temp_str + 11);
+        current_health.net_in = atof(net_in_str + 9);
+        current_health.net_out = atof(net_out_str + 10);
+        current_health.processes = atoi(proc_str + 12);
         current_health.valid = true;
-        is_connected = true;
 
-        uint32_t time_since_last = (last_data_time > 0) ? (receive_time - last_data_time) : 0;
-        last_data_time = receive_time;
+        if (!is_connected)
+        {
+            printf("\n[CONNECTED] Starting sample counter\n");
+            sample_count = 0;
+            is_connected = true;
+        }
 
         sample_count++;
-        if (sample_count > 9999)
-            sample_count = 1;
-
         display_compact_status();
-
-        if (time_since_last > 0)
-        {
-            printf("[TIMING] Gap since last sample: %lu ms\n", time_since_last);
-        }
     }
 }
 
 void display_compact_status(void)
 {
-    printf("[%04lu] CPU=%5.1f%% | RAM=%5.1f%% | DISK=%5.1f%% | TEMP=%5.1fC | NET=D%6.1f U%6.1f KB/s | PROC=%d\n",
+    printf("\r[%4lu] CPU:%5.1f%% MEM:%5.1f%% DSK:%5.1f%% T:%4.1fC "
+           "N↓%5.1fMB/s ↑%5.1fMB/s P:%3d",
            sample_count,
            current_health.cpu,
            current_health.memory,
@@ -424,233 +569,72 @@ void display_compact_status(void)
            current_health.net_in,
            current_health.net_out,
            current_health.processes);
-}
-
-// [------------------------------------------------------------------------- LED -------------------------------------------------------------------------]
-
-void led_blinking_task(void)
-{
-    static uint32_t last_toggle = 0;
-    uint32_t now = board_millis();
-
-    if (is_connected)
-    {
-        if (now - last_toggle >= 100)
-        {
-            gpio_put(LED_PIN, !gpio_get(LED_PIN));
-            last_toggle = now;
-        }
-    }
-    else
-    {
-        gpio_put(LED_PIN, 0);
-    }
-}
-
-// [------------------------------------------------------------------------- Wifi -------------------------------------------------------------------------]
-
-static bool wifi_connected = false;
-static uint32_t last_wifi_check = 0;
-#define WIFI_CHECK_INTERVAL_MS 10000 // Check every 10 seconds
-
-bool init_wifi(void)
-{
-    printf("=== Starting WiFi Initialization ===\n");
-
-    if (cyw43_arch_init())
-    {
-        printf("ERROR: WiFi init failed\n");
-        return false;
-    }
-    printf("WiFi chip initialized\n");
-
-    cyw43_arch_enable_sta_mode();
-
-    // Reduce WiFi power to avoid current spikes
-    cyw43_wifi_pm(&cyw43_state, CYW43_PERFORMANCE_PM);
-
-    printf("Station mode enabled\n");
-
-    return try_wifi_connect();
-}
-
-bool try_wifi_connect(void)
-{
-    printf("Connecting to: %s\n", WIFI_SSID);
-    printf("Please wait...\n");
-
-    int result = cyw43_arch_wifi_connect_timeout_ms(
-        WIFI_SSID,
-        WIFI_PASSWORD,
-        CYW43_AUTH_WPA2_AES_PSK,
-        30000 // 30 second timeout
-    );
-
-    // Check detailed status
-    int status = cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA);
-    printf("Link status after connect: %d\n", status);
-
-    if (result != 0)
-    {
-        printf("ERROR: Failed to connect (error code: %d)\n", result);
-
-        // Detailed error codes
-        switch (result)
-        {
-        case PICO_ERROR_TIMEOUT:
-            printf("  -> Timeout: Check if SSID '%s' exists and is in range\n", WIFI_SSID);
-            break;
-        case PICO_ERROR_GENERIC:
-            printf("  -> Generic error: Check password\n");
-            break;
-        default:
-            printf("  -> Unknown error\n");
-            break;
-        }
-
-        wifi_connected = false;
-        return false;
-    }
-
-    printf("=== WiFi Connected Successfully! ===\n");
-
-    // Print IP address
-    extern cyw43_t cyw43_state;
-    uint32_t ip = cyw43_state.netif[0].ip_addr.addr;
-
-    if (ip == 0)
-    {
-        printf("ERROR: Connected but no IP address assigned!\n");
-        wifi_connected = false;
-        return false;
-    }
-
-    printf("IP Address: %d.%d.%d.%d\n",
-           ip & 0xFF,
-           (ip >> 8) & 0xFF,
-           (ip >> 16) & 0xFF,
-           (ip >> 24) & 0xFF);
-
-    wifi_connected = true;
-    last_wifi_check = to_ms_since_boot(get_absolute_time());
-    return true;
-}
-
-void check_wifi_connection(void)
-{
-    uint32_t now = to_ms_since_boot(get_absolute_time());
-
-    // Only check periodically
-    if (now - last_wifi_check < WIFI_CHECK_INTERVAL_MS)
-    {
-        return;
-    }
-
-    last_wifi_check = now;
-
-    // Check if we're still connected
-    int link_status = cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA);
-
-    // Only reconnect if truly disconnected (not just "no packets")
-    if (link_status == CYW43_LINK_DOWN || link_status == CYW43_LINK_FAIL || link_status == CYW43_LINK_NONET)
-    {
-        if (wifi_connected)
-        {
-            printf("WiFi connection lost! Attempting to reconnect...\n");
-            wifi_connected = false;
-        }
-
-        // Try to reconnect
-        try_wifi_connect();
-    }
-    else if (link_status == CYW43_LINK_UP)
-    {
-        if (!wifi_connected)
-        {
-            printf("WiFi connection restored!\n");
-        }
-        wifi_connected = true;
-    }
+    fflush(stdout);
 }
 
 // [------------------------------------------------------------------------- HTTPS Callbacks -------------------------------------------------------------------------]
 
-void dns_callback(const char *name, const ip_addr_t *ipaddr, void *arg)
+void dns_callback(const char* name, const ip_addr_t* ipaddr, void* arg)
 {
     if (ipaddr)
     {
-        printf("DNS resolved: %s -> %s\n", name, ip4addr_ntoa(ipaddr));
-        *((ip_addr_t *)arg) = *ipaddr;
+        ip_addr_t* result = (ip_addr_t*)arg;
+        *result = *ipaddr;
+    }
+}
+
+err_t https_connected_callback(void* arg, struct altcp_pcb* tpcb, err_t err)
+{
+    if (err == ERR_OK)
+    {
+        https_state_t* state = (https_state_t*)arg;
+        state->connected = true;
+        printf("TLS handshake complete!\n");
     }
     else
     {
-        printf("DNS resolution failed for %s\n", name);
-        ((ip_addr_t *)arg)->addr = 0;
+        printf("Connection callback error: %d\n", err);
     }
-}
-
-err_t https_connected_callback(void *arg, struct altcp_pcb *tpcb, err_t err)
-{
-    (void)arg;
-
-    if (err != ERR_OK)
-    {
-        printf("HTTPS connection failed: %d\n", err);
-        return err;
-    }
-
-    printf("HTTPS connection established!\n");
-    https_state.connected = true;
-
     return ERR_OK;
 }
 
-err_t https_recv_callback(void *arg, struct altcp_pcb *tpcb, struct pbuf *p, err_t err)
+err_t https_recv_callback(void* arg, struct altcp_pcb* tpcb, struct pbuf* p, err_t err)
 {
-    (void)arg;
+    https_state_t* state = (https_state_t*)arg;
 
-    if (err != ERR_OK || p == NULL)
+    if (!p)
     {
-        if (p)
-            pbuf_free(p);
-        return err;
+        return ERR_OK;
     }
 
-    // Print response
-    struct pbuf *current = p;
-    while (current != NULL)
-    {
-        printf("%.*s", current->len, (char *)current->payload);
-        https_state.bytes_received += current->len;
-        current = current->next;
-    }
-
+    state->bytes_received += p->tot_len;
     altcp_recved(tpcb, p->tot_len);
     pbuf_free(p);
 
     return ERR_OK;
 }
 
-void https_err_callback(void *arg, err_t err)
+void https_err_callback(void* arg, err_t err)
 {
-    (void)arg;
-    printf("HTTPS error callback: %d\n", err);
+    printf("Connection error: %d\n", err);
+    https_state_t* state = (https_state_t*)arg;
 
-    if (https_state.tls_config)
+    if (state->tls_config)
     {
-        altcp_tls_free_config(https_state.tls_config);
-        https_state.tls_config = NULL;
+        altcp_tls_free_config(state->tls_config);
+        state->tls_config = NULL;
     }
 
-    https_state.connected = false;
+    state->connected = false;
 }
 
 // [------------------------------------------------------------------------- Webhook POST -------------------------------------------------------------------------]
 
-void send_webhook_post(void)
+void send_webhook_post(int num_requests)
 {
-    if (!wifi_connected)
-    {
+    printf("Start POST...\n");
+    fflush(stdout);
+    if (!wifi_connected) {
         printf("Cannot send POST - WiFi not connected\n");
         return;
     }
@@ -662,72 +646,59 @@ void send_webhook_post(void)
     https_state.request_sent = false;
     https_state.bytes_received = 0;
 
-    // Step 1: Resolve DNS
+    // Step 1-6: DNS + TLS Handshake (ONCE)
     ip_addr_t server_ip;
     server_ip.addr = 0;
 
     printf("Resolving %s...\n", WEBHOOK_HOSTNAME);
-
     err_t dns_err = dns_gethostbyname(WEBHOOK_HOSTNAME, &server_ip, dns_callback, &server_ip);
-    printf("[Stage] DNS result: %d, ip=%s\n", dns_err, ip4addr_ntoa(&server_ip));
 
-    if (dns_err == ERR_INPROGRESS)
-    {
-        // Wait for DNS resolution
+    if (dns_err == ERR_INPROGRESS) {
         int timeout = 0;
-        while (server_ip.addr == 0 && timeout < 100)
-        {
+        while (server_ip.addr == 0 && timeout < 100) {
             sleep_ms(100);
             timeout++;
         }
     }
 
-    if (server_ip.addr == 0)
-    {
+    if (server_ip.addr == 0) {
         printf("DNS resolution failed\n");
         return;
     }
 
     printf("Resolved to: %s\n", ip4addr_ntoa(&server_ip));
 
-    // Step 2: Create mTLS configuration
     u8_t ca_cert[] = CA_CERT;
     u8_t client_cert[] = CLIENT_CERT;
-    // static const u8_t client_key[] = CLIENT_KEY;
     u8_t client_key[] = CLIENT_KEY;
 
-    printf("[Stage] Creating TLS config\n");
-    // https_state.tls_config = altcp_tls_create_config_client(ca_cert, sizeof(ca_cert)); //code responsible for one way handshake
     https_state.tls_config = altcp_tls_create_config_client_2wayauth(
         ca_cert, sizeof(ca_cert),
         client_key, sizeof(client_key),
-        NULL, 0, // or password + length if encrypted key
-        client_cert, sizeof(client_cert));
+        NULL, 0,
+        client_cert, sizeof(client_cert)
+    );
 
-    if (!https_state.tls_config)
-    {
+    if (!https_state.tls_config) {
         printf("Failed to create TLS config\n");
         return;
     }
 
-    // Step 3: Create mTLS PCB
-    struct altcp_pcb *pcb = altcp_tls_new(https_state.tls_config, IPADDR_TYPE_V4);
+    struct altcp_pcb* pcb = altcp_tls_new(https_state.tls_config, IPADDR_TYPE_V4);
 
-    if (!pcb)
-    {
+    if (!pcb) {
         printf("Failed to create TLS PCB\n");
         altcp_tls_free_config(https_state.tls_config);
         https_state.tls_config = NULL;
         return;
     }
 
-    // Step 4: Set SNI hostname
     int mbedtls_err = mbedtls_ssl_set_hostname(
-        &(((altcp_mbedtls_state_t *)(pcb->state))->ssl_context),
-        WEBHOOK_HOSTNAME);
+        &(((altcp_mbedtls_state_t*)(pcb->state))->ssl_context),
+        WEBHOOK_HOSTNAME
+    );
 
-    if (mbedtls_err != 0)
-    {
+    if (mbedtls_err != 0) {
         printf("Failed to set SNI hostname\n");
         altcp_close(pcb);
         altcp_tls_free_config(https_state.tls_config);
@@ -735,18 +706,15 @@ void send_webhook_post(void)
         return;
     }
 
-    // Step 5: Set up callbacks
     altcp_arg(pcb, &https_state);
     altcp_err(pcb, https_err_callback);
     altcp_recv(pcb, https_recv_callback);
 
-    // Step 6: Connect
     printf("Connecting to %s:443...\n", WEBHOOK_HOSTNAME);
-
+    
     err_t connect_err = altcp_connect(pcb, &server_ip, 443, https_connected_callback);
 
-    if (connect_err != ERR_OK)
-    {
+    if (connect_err != ERR_OK) {
         printf("Connection failed: %d\n", connect_err);
         altcp_close(pcb);
         altcp_tls_free_config(https_state.tls_config);
@@ -754,78 +722,81 @@ void send_webhook_post(void)
         return;
     }
 
-    // Wait for connection - poll lwIP to process packets
     int timeout = 0;
-    while (!https_state.connected && timeout < 150)
-    {
-        cyw43_arch_poll(); // Let lwIP process packets
+    while (!https_state.connected && timeout < 150) {
+        cyw43_arch_poll();
         sleep_ms(100);
         timeout++;
     }
 
-    if (!https_state.connected)
-    {
+    if (!https_state.connected) {
         printf("Connection timeout\n");
         altcp_close(pcb);
         return;
     }
 
-    // Step 7: Send HTTPS POST request
-    char json_body[256];
-    int body_len = snprintf(json_body, sizeof(json_body),
-                            "{\"button\":\"GP21 pressed\",\"timestamp\":%lu,\"device\":\"Pico-W\"}",
-                            to_ms_since_boot(get_absolute_time()));
+    // Step 7: Send multiple POST requests over the SAME connection
+    for (int req_num = 0; req_num < num_requests; req_num++) {
+        printf("\n--- Sending request %d/%d ---\n", req_num + 1, num_requests);
+        
+        https_state.bytes_received = 0;
+        https_state.request_sent = false;
 
-    char request[512];
-    int req_len = snprintf(request, sizeof(request),
-                           "POST /%s HTTP/1.1\r\n"
-                           "Host: %s\r\n"
-                           "Content-Type: application/json\r\n"
-                           "Content-Length: %d\r\n"
-                           "Connection: close\r\n"
-                           "\r\n"
-                           "%s",
-                           WEBHOOK_TOKEN, WEBHOOK_HOSTNAME, body_len, json_body);
+        char json_body[256];
+        int body_len = snprintf(json_body, sizeof(json_body),
+                                "{\"button\":\"GP21 pressed\",\"timestamp\":%lu,\"device\":\"Pico-W\",\"request\":%d}",
+                                to_ms_since_boot(get_absolute_time()), req_num + 1);
 
-    printf("Sending HTTPS request...\n");
+        char request[512];
+        int req_len = snprintf(request, sizeof(request),
+                               "POST /%s HTTP/1.1\r\n"
+                               "Host: %s\r\n"
+                               "Content-Type: application/json\r\n"
+                               "Content-Length: %d\r\n"
+                               "Connection: keep-alive\r\n"
+                               "\r\n"
+                               "%s",
+                               WEBHOOK_TOKEN, WEBHOOK_HOSTNAME, body_len, json_body);
 
-    err_t write_err = altcp_write(pcb, request, req_len, TCP_WRITE_FLAG_COPY);
+        printf("Sending HTTPS request...\n");
+        
+        err_t write_err = altcp_write(pcb, request, req_len, TCP_WRITE_FLAG_COPY);
 
-    if (write_err == ERR_OK)
-    {
-        altcp_output(pcb);
+        if (write_err == ERR_OK) {
+            altcp_output(pcb);
+            
+            printf("Request sent! Waiting for response...\n");
+            https_state.request_sent = true;
 
-        printf("Request sent! Waiting for response...\n");
-        https_state.request_sent = true;
+            // Wait for response
+            for (int i = 0; i < 30; i++) {
+                cyw43_arch_poll();
+                sleep_ms(100);
+            }
 
-        // Wait for response - poll lwIP
-        for (int i = 0; i < 30; i++)
-        {
-            cyw43_arch_poll();
-            sleep_ms(100);
+            printf("Received %d bytes\n", https_state.bytes_received);
+        } else {
+            printf("Failed to send request: %d\n", write_err);
+            break;
         }
 
-        // Blink LED to confirm
-        for (int i = 0; i < 6; i++)
-        {
-            gpio_put(LED_PIN, 1);
-            sleep_ms(50);
-            gpio_put(LED_PIN, 0);
-            sleep_ms(50);
-        }
-
-        printf("\nReceived %d bytes\n", https_state.bytes_received);
+        sleep_ms(100);
     }
-    else
-    {
-        printf("Failed to send request: %d\n", write_err);
+
+    // Blink LED to confirm all requests sent
+    for (int i = 0; i < 6; i++) {
+        gpio_put(LED_PIN, 1);
+        sleep_ms(50);
+        gpio_put(LED_PIN, 0);
+        sleep_ms(50);
     }
 
     // Cleanup
     altcp_close(pcb);
 
-    printf("=== HTTPS POST complete ===\n\n");
+    printf("=== HTTPS POST complete (%d requests sent) ===\n\n", num_requests);
 }
+
 
 void check_webhook_button(void)
 {
@@ -840,13 +811,15 @@ void check_webhook_button(void)
         if (now - debounce_time > 200)
         {
             printf("\n>>> GP21 Button Pressed! <<<\n");
-            webhook_trigger = true; // Signal Core 1 to send
+            webhook_trigger = true;
             debounce_time = now;
         }
     }
 
     last_button_state = current_state;
 }
+
+
 
 // [------------------------------------------------------------------------- Core 1 - WiFi Handler -------------------------------------------------------------------------]
 
@@ -856,28 +829,46 @@ void core1_entry(void)
 
     sleep_ms(1000);
 
-    if (init_wifi())
+    bool wifi_init_success = false;
+    int retry_count = 0;
+    const int MAX_RETRIES = 5;
+
+    // Try to connect up to MAX_RETRIES times
+    while (!wifi_init_success && retry_count < MAX_RETRIES)
+    {
+        if (retry_count > 0)
+        {
+            printf("Core 1: Retry attempt %d/%d in 3 seconds...\n", retry_count + 1, MAX_RETRIES);
+            sleep_ms(3000);
+        }
+
+        wifi_init_success = init_wifi();
+        retry_count++;
+    }
+
+    if (wifi_init_success)
     {
         printf("Core 1: WiFi ready!\n");
     }
     else
     {
-        printf("Core 1: WiFi failed\n");
+        printf("Core 1: WiFi failed after %d attempts\n", MAX_RETRIES);
     }
 
     // Core 1 main loop - handle WiFi tasks AND webhook
     while (true)
     {
+        cyw43_arch_poll();  // CRITICAL: Keep WiFi stack alive
         check_wifi_connection();
-
+        
         // Check if Core 0 requested a webhook POST
         if (webhook_trigger && wifi_connected)
         {
-            webhook_trigger = false; // Clear flag
-            send_webhook_post();
+            webhook_trigger = false;
+            send_webhook_post(50);
         }
-
-        sleep_ms(50); // Check more frequently for responsiveness
+        
+        sleep_ms(100);  // Poll more frequently for stability
     }
 }
 
@@ -887,16 +878,13 @@ bool init_sd_card(void)
 {
     printf("Initializing SD card...\n");
 
-    // Small delay to ensure SPI bus is stable
     sleep_ms(100);
 
-    // Initialize SD card
     FRESULT fr = f_mount(&fs, "0:", 1);
     if (fr != FR_OK)
     {
         printf("SD card mount failed: %d\n", fr);
 
-        // Try once more after delay
         sleep_ms(500);
         fr = f_mount(&fs, "0:", 1);
         if (fr != FR_OK)
@@ -920,7 +908,6 @@ void log_disconnect_event(void)
     FRESULT fr;
     UINT bytes_written;
 
-    // Open file in append mode, create if doesn't exist
     fr = f_open(&fil, "0:/pico_logs.txt", FA_WRITE | FA_OPEN_APPEND);
     if (fr != FR_OK)
     {
@@ -928,16 +915,13 @@ void log_disconnect_event(void)
         return;
     }
 
-    // Get timestamp
     uint32_t timestamp = to_ms_since_boot(get_absolute_time());
 
-    // Create log message
     char log_msg[128];
     snprintf(log_msg, sizeof(log_msg),
              "[%lu ms] DISCONNECT - Sample count was %lu\n",
              timestamp, sample_count);
 
-    // Write to file
     fr = f_write(&fil, log_msg, strlen(log_msg), &bytes_written);
     if (fr != FR_OK)
     {
@@ -948,6 +932,5 @@ void log_disconnect_event(void)
         printf("Logged disconnect event to SD card\n");
     }
 
-    // Close file to ensure data is saved
     f_close(&fil);
 }
