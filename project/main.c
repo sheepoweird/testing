@@ -65,7 +65,7 @@ bool init_sd_card(void);
 bool init_wifi(void);
 bool try_wifi_connect(void);
 void check_wifi_connection(void);
-void send_webhook_post(int num_requests);
+void send_webhook_post();
 void check_webhook_button(void);
 void core1_entry(void);
 
@@ -553,7 +553,10 @@ void process_json_data(char *json)
         }
 
         sample_count++;
-        display_compact_status();
+        // display_compact_status();
+
+        
+        send_webhook_post();
     }
 }
 
@@ -630,7 +633,7 @@ void https_err_callback(void* arg, err_t err)
 
 // [------------------------------------------------------------------------- Webhook POST -------------------------------------------------------------------------]
 
-void send_webhook_post(int num_requests)
+void send_webhook_post()
 {
     printf("Start POST...\n");
     fflush(stdout);
@@ -667,16 +670,14 @@ void send_webhook_post(int num_requests)
     }
 
     printf("Resolved to: %s\n", ip4addr_ntoa(&server_ip));
+    fflush(stdout);
 
     u8_t ca_cert[] = CA_CERT;
-    u8_t client_cert[] = CLIENT_CERT;
-    u8_t client_key[] = CLIENT_KEY;
+    // u8_t client_cert[] = CLIENT_CERT;
+    // u8_t client_key[] = CLIENT_KEY;
 
-    https_state.tls_config = altcp_tls_create_config_client_2wayauth(
-        ca_cert, sizeof(ca_cert),
-        client_key, sizeof(client_key),
-        NULL, 0,
-        client_cert, sizeof(client_cert)
+    https_state.tls_config = altcp_tls_create_config_client(
+        ca_cert, sizeof(ca_cert)
     );
 
     if (!https_state.tls_config) {
@@ -736,16 +737,33 @@ void send_webhook_post(int num_requests)
     }
 
     // Step 7: Send multiple POST requests over the SAME connection
-    for (int req_num = 0; req_num < num_requests; req_num++) {
-        printf("\n--- Sending request %d/%d ---\n", req_num + 1, num_requests);
+    // for (int req_num = 0; req_num < num_requests; req_num++) {
+        // printf("\n--- Sending request %d/%d ---\n", req_num + 1, num_requests);
         
         https_state.bytes_received = 0;
         https_state.request_sent = false;
 
         char json_body[256];
+        // int body_len = snprintf(json_body, sizeof(json_body),
+        //                         "{\"button\":\"GP21 pressed\",\"timestamp\":%lu,\"device\":\"Pico-W\",\"request\":%d}",
+        //                         to_ms_since_boot(get_absolute_time()), req_num + 1);
+
+        printf("\r[%4lu] CPU:%5.1f%% MEM:%5.1f%% DSK:%5.1f%% T:%4.1fC "
+           "N↓%5.1fMB/s ↑%5.1fMB/s P:%3d",
+           sample_count,
+           current_health.cpu,
+           current_health.memory,
+           current_health.disk,
+           current_health.cpu_temp,
+           current_health.net_in,
+           current_health.net_out,
+           current_health.processes);
+
         int body_len = snprintf(json_body, sizeof(json_body),
-                                "{\"button\":\"GP21 pressed\",\"timestamp\":%lu,\"device\":\"Pico-W\",\"request\":%d}",
-                                to_ms_since_boot(get_absolute_time()), req_num + 1);
+                                "{\"button\":\"GP21 pressed\",\"timestamp\":%lu,\"device\":\"Pico-W\",\"request\":}",
+                                to_ms_since_boot(get_absolute_time()));
+
+        
 
         char request[512];
         int req_len = snprintf(request, sizeof(request),
@@ -777,11 +795,11 @@ void send_webhook_post(int num_requests)
             printf("Received %d bytes\n", https_state.bytes_received);
         } else {
             printf("Failed to send request: %d\n", write_err);
-            break;
+            // break;
         }
 
         sleep_ms(100);
-    }
+    // }
 
     // Blink LED to confirm all requests sent
     for (int i = 0; i < 6; i++) {
@@ -794,7 +812,7 @@ void send_webhook_post(int num_requests)
     // Cleanup
     altcp_close(pcb);
 
-    printf("=== HTTPS POST complete (%d requests sent) ===\n\n", num_requests);
+    // printf("=== HTTPS POST complete (%d requests sent) ===\n\n", num_requests);
 }
 
 
@@ -865,7 +883,7 @@ void core1_entry(void)
         if (webhook_trigger && wifi_connected)
         {
             webhook_trigger = false;
-            send_webhook_post(50);
+            send_webhook_post();
         }
         
         sleep_ms(100);  // Poll more frequently for stability
