@@ -1,9 +1,3 @@
-#!/usr/bin/env python3
-"""
-PC Health Monitor with Pico CDC Communication
-Monitors system health and sends data to Raspberry Pi Pico
-"""
-
 import psutil
 import json
 import time
@@ -19,12 +13,25 @@ class HealthMonitorPico:
     def __init__(self, pico_port=None, interval=5, log_file="health_monitor.txt"):
         self.pico_port = pico_port
         self.interval = interval
-        self.log_file = log_file
         self.running = False
         self.network_history = deque(maxlen=10)
         self.start_time = time.time()
         self.sample_count = 0
         self.serial_connection = None
+
+        # Determine base directory (works for .py and PyInstaller .exe)
+        if getattr(sys, 'frozen', False):
+            # Running as compiled executable
+            base_dir = os.path.dirname(sys.executable)
+        else:
+            # Running as Python script
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+
+        # If a relative filename was given, resolve it under the base directory
+        if not os.path.isabs(log_file):
+            self.log_file = os.path.join(base_dir, log_file)
+        else:
+            self.log_file = log_file
 
     def find_pico_port(self):
         """Find the Pico's CDC serial port"""
