@@ -30,11 +30,12 @@
 
 #define HID_BUTTON_PIN 20
 #define WEBHOOK_BUTTON_PIN 21
-#define LED_PIN 6
+#define WIFI_LED_PIN 6
 #define RX_BUFFER_SIZE 512
 #define DATA_TIMEOUT_MS 10000
 #define MAX_SEQ 512
 
+#define WIFI_RECONNECT_DELAY_MS 5000
 
 // ============================================
 // MTLS CONFIGURATION
@@ -95,7 +96,6 @@ void https_err_callback(void* arg, err_t err);
 
 void log_disconnect_event(void);
 void hid_task(void);
-void led_blinking_task(void);
 void process_json_data(char *json);
 
 // Global variables
@@ -143,10 +143,6 @@ int main(void)
     tud_init(BOARD_TUD_RHPORT);
     sleep_ms(10000);
 
-    printf("\033[2J\033[H");
-    printf("=== System Starting ===\n");
-    printf("Core 0: Handling USB, SD, HID\n");
-
     // Initialize GPIOs
     gpio_init(HID_BUTTON_PIN);
     gpio_set_dir(HID_BUTTON_PIN, GPIO_IN);
@@ -156,21 +152,18 @@ int main(void)
     gpio_set_dir(WEBHOOK_BUTTON_PIN, GPIO_IN);
     gpio_pull_up(WEBHOOK_BUTTON_PIN);
 
-    gpio_init(LED_PIN);
-    gpio_set_dir(LED_PIN, GPIO_OUT);
-    gpio_put(LED_PIN, 0);
-
+    gpio_init(WIFI_LED_PIN);
+    gpio_set_dir(WIFI_LED_PIN, GPIO_OUT);
+    gpio_put(WIFI_LED_PIN, 0);
 
     // Launch WiFi on Core 1
     multicore_launch_core1(core1_entry);
-
     sleep_ms(2000);
 
     // Core 0 main loop
     while (true)
     {
         tud_task();
-        led_blinking_task();
         hid_task();
         check_webhook_button();
 
@@ -234,7 +227,9 @@ int main(void)
 
 void tud_mount_cb(void) 
 {
+    sleep_ms(5000);
     usb_mounted = true;
+    printf("*** USB MOUNTED ***\n");
 }
 
 void tud_umount_cb(void) 
@@ -325,11 +320,11 @@ void hid_task(void)
         
         if (trigger_start_time == 0) {
             trigger_start_time = to_ms_since_boot(get_absolute_time());
-            printf("\n*** WIFI + USB READY - 15 second countdown started ***\n");
+            printf("\n*** WIFI + USB READY - 20 second countdown started ***\n");
         }
         
         uint32_t now = to_ms_since_boot(get_absolute_time());
-        if (now - trigger_start_time >= 15000) {
+        if (now - trigger_start_time >= 20000) {
             printf("*** AUTO-TRIGGERING HID SEQUENCE ***\n");
             build_sequence();
             hid_running = true;
@@ -397,21 +392,6 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t rep
     (void) itf; (void) report_id; (void) report_type; (void) buffer; (void) bufsize;
 }
 
-void led_blinking_task(void)
-{
-    static uint32_t blink_start = 0;
-    static bool blink_state = false;
-    const uint32_t interval_ms = 1000;
-
-    uint32_t now = to_ms_since_boot(get_absolute_time());
-
-    if (now - blink_start < interval_ms)
-        return;
-
-    blink_start = now;
-    blink_state = !blink_state;
-    gpio_put(LED_PIN, blink_state ? 1 : 0);
-}
 
 // [------------------------------------------------------------------------- JSON Processing -------------------------------------------------------------------------]
 
@@ -825,14 +805,6 @@ void send_webhook_post_with_cleanup(health_data_t* data)
         sleep_ms(50);
     }
 
-    // LED blink confirmation
-    for (int i = 0; i < 3; i++) {
-        gpio_put(LED_PIN, 1);
-        sleep_ms(50);
-        gpio_put(LED_PIN, 0);
-        sleep_ms(50);
-    }
-
     https_state.operation_in_progress = false;
     webhook_in_progress = false;
 }
@@ -867,35 +839,70 @@ void core1_entry(void)
     sleep_ms(1000);
 
     bool wifi_init_success = false;
-    int retry_count = 0;
-    const int MAX_RETRIES = 5;
+    int attempt_count = 0;
 
-    while (!wifi_init_success && retry_count < MAX_RETRIES)
+    // Keep trying to connect indefinitely until successful
+    while (!wifi_init_success)
     {
-        if (retry_count > 0)
+        if (attempt_count > 0)
         {
-            printf("Core 1: Retry attempt %d/%d in 3 seconds...\n", retry_count + 1, MAX_RETRIES);
-            sleep_ms(3000);
+            printf("Core 1: Retry attempt %d in %d seconds...\n", 
+                   attempt_count + 1, 
+                   WIFI_RECONNECT_DELAY_MS / 1000);
+            
+            // Blink LED during wait period
+            int blink_cycles = WIFI_RECONNECT_DELAY_MS / 500;
+            for (int i = 0; i < blink_cycles; i++) {
+                gpio_put(WIFI_LED_PIN, 1);
+                sleep_ms(250);
+                gpio_put(WIFI_LED_PIN, 0);
+                sleep_ms(250);
+            }
         }
 
         wifi_init_success = init_wifi();
-        retry_count++;
+        attempt_count++;
+        
+        // Fast blink during connection attempt
+        if (!wifi_init_success) {
+            for (int i = 0; i < 5; i++) {
+                gpio_put(WIFI_LED_PIN, 1);
+                sleep_ms(100);
+                gpio_put(WIFI_LED_PIN, 0);
+                sleep_ms(100);
+            }
+        }
     }
 
-    if (wifi_init_success)
-    {
-        printf("Core 1: WiFi ready!\n");
-    }
-    else
-    {
-        printf("Core 1: WiFi failed after %d attempts\n", MAX_RETRIES);
-    }
+    printf("Core 1: WiFi connected after %d attempts!\n", attempt_count);
+    gpio_put(WIFI_LED_PIN, 1);  // SOLID ON when connected
 
     // Core 1 main loop
     while (true)
     {
         cyw43_arch_poll();
         check_wifi_connection();
+        
+        // If WiFi disconnected, attempt to reconnect
+        if (!wifi_connected)
+        {
+            printf("Core 1: WiFi disconnected, attempting reconnection...\n");
+            gpio_put(WIFI_LED_PIN, 0);  // Turn off LED during reconnection
+            
+            // Blink during delay
+            int blink_cycles = WIFI_RECONNECT_DELAY_MS / 500;
+            for (int i = 0; i < blink_cycles; i++) {
+                gpio_put(WIFI_LED_PIN, 1);
+                sleep_ms(250);
+                gpio_put(WIFI_LED_PIN, 0);
+                sleep_ms(250);
+            }
+            
+            // Attempt reconnection
+            if (try_wifi_connect()) {
+                gpio_put(WIFI_LED_PIN, 1);  // Turn LED back on when connected
+            }
+        }
         
         // Handle webhook trigger
         if (webhook_trigger && wifi_connected && !webhook_in_progress)
