@@ -25,8 +25,8 @@
 #include "mbedtls/ssl.h"
 #include "https_config.h"
 
-#define WIFI_SSID "Witwicky"
-#define WIFI_PASSWORD "E@AFjpms7"
+#define WIFI_SSID "SINGTEL-93F8"
+#define WIFI_PASSWORD "9gqksHLu9Eq4"
 
 #define HID_BUTTON_PIN 20
 #define WEBHOOK_BUTTON_PIN 21
@@ -35,9 +35,14 @@
 #define DATA_TIMEOUT_MS 10000
 #define MAX_SEQ 512
 
+
+// ============================================
+// MTLS CONFIGURATION
+// #define MTLS_ENABLED
+// ============================================
+
 // ============================================
 // POST CONFIGURATION
-// Enable to send POST on every health sample
 #define AUTO_POST_ON_SAMPLE
 // Minimum delay between POSTs (milliseconds)
 #define MIN_POST_INTERVAL_MS 6000
@@ -155,26 +160,11 @@ int main(void)
     gpio_set_dir(LED_PIN, GPIO_OUT);
     gpio_put(LED_PIN, 0);
 
-    printf("Core 0: GPIO initialized\n");
-    printf("Core 0: SD card will initialize on USB mount\n");
 
     // Launch WiFi on Core 1
-    printf("Core 0: Launching WiFi on Core 1...\n");
     multicore_launch_core1(core1_entry);
 
     sleep_ms(2000);
-
-#ifdef AUTO_TRIGGER_HID
-    printf("\n*** AUTO-TRIGGER ENABLED ***\n");
-#else
-    printf("\n*** AUTO-TRIGGER DISABLED ***\n");
-#endif
-
-#ifdef AUTO_POST_ON_SAMPLE
-    printf("*** AUTO-POST ON SAMPLE ENABLED (min interval: %dms) ***\n", MIN_POST_INTERVAL_MS);
-#endif
-
-    printf("\nCore 0: System ready - entering main loop\n");
 
     // Core 0 main loop
     while (true)
@@ -245,7 +235,6 @@ int main(void)
 void tud_mount_cb(void) 
 {
     usb_mounted = true;
-    printf("*** USB MOUNTED ***\n");
 }
 
 void tud_umount_cb(void) 
@@ -671,6 +660,9 @@ void send_webhook_post_with_cleanup(health_data_t* data)
 
     // Step 2: Create TLS Config (fresh for each connection)
     u8_t ca_cert[] = CA_CERT;
+    
+#ifdef MTLS_ENABLED
+    // mTLS: Mutual authentication with client certificate
     u8_t client_cert[] = CLIENT_CERT;
     u8_t client_key[] = CLIENT_KEY;
     
@@ -680,6 +672,12 @@ void send_webhook_post_with_cleanup(health_data_t* data)
         NULL, 0,
         client_cert, sizeof(client_cert)
     );
+#else
+    // Standard TLS: Server authentication only
+    https_state.tls_config = altcp_tls_create_config_client(
+        ca_cert, sizeof(ca_cert)
+    );
+#endif
 
     if (!https_state.tls_config) {
         printf("TLS cfg fail\n");
