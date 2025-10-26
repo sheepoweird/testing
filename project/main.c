@@ -25,8 +25,8 @@
 #include "mbedtls/ssl.h"
 #include "https_config.h"
 
-#define WIFI_SSID "Anthrooo"
-#define WIFI_PASSWORD "abcd1234"
+#define WIFI_SSID "SINGTEL-93F8"
+#define WIFI_PASSWORD "9gqksHLu9Eq4"
 
 #define HID_BUTTON_PIN 20
 #define WEBHOOK_BUTTON_PIN 21
@@ -35,13 +35,32 @@
 #define DATA_TIMEOUT_MS 10000
 #define MAX_SEQ 512
 
+// ============================================
+// POST CONFIGURATION
+// Enable to send POST on every health sample
+#define AUTO_POST_ON_SAMPLE
+// Minimum delay between POSTs (milliseconds)
+#define MIN_POST_INTERVAL_MS 6000
+// ============================================
+
+// ============================================
+// SERIAL VERBOSITY CONTROL
+#define VERBOSE_SERIAL 0
+// ============================================
+
+// ============================================
+// AUTO-HID TRIGGER CONFIGURATION
+#define AUTO_TRIGGER_HID
+// ============================================
+
 static FATFS fs;
 static bool sd_mounted = false;
+static bool sd_init_attempted = false;
 
 char rx_buffer[RX_BUFFER_SIZE];
 int rx_index = 0;
 
-// Type definition - MUST come before forward declarations that use it
+// Type definition
 typedef struct
 {
     float cpu;
@@ -56,14 +75,14 @@ typedef struct
 
 // Forward Declarations
 bool init_sd_card(void);
+bool try_sd_mount(void);
 bool init_wifi(void);
 bool try_wifi_connect(void);
 void check_wifi_connection(void);
-void send_webhook_post(void);
+void send_webhook_post_with_cleanup(health_data_t* data);
 void check_webhook_button(void);
 void core1_entry(void);
 
-// Add these new declarations:
 void dns_callback(const char* name, const ip_addr_t* ipaddr, void* arg);
 err_t https_connected_callback(void* arg, struct altcp_pcb* tpcb, err_t err);
 err_t https_recv_callback(void* arg, struct altcp_pcb* tpcb, struct pbuf* p, err_t err);
@@ -73,7 +92,6 @@ void log_disconnect_event(void);
 void hid_task(void);
 void led_blinking_task(void);
 void process_json_data(char *json);
-void display_compact_status(void);
 
 // Global variables
 health_data_t current_health = {0};
@@ -84,15 +102,33 @@ bool is_connected = false;
 // HTTPS connection state
 typedef struct {
     struct altcp_tls_config* tls_config;
+    struct altcp_pcb* pcb;
     bool connected;
     bool request_sent;
+    bool operation_in_progress;
     uint16_t bytes_received;
+    uint32_t operation_start_time;
+    health_data_t pending_data;
 } https_state_t;
 
 static https_state_t https_state = {0};
 
-// Add this new variable for inter-core communication:
+// Inter-core communication
 static volatile bool webhook_trigger = false;
+static volatile bool webhook_in_progress = false;
+static uint32_t last_post_time = 0;
+
+// Auto-trigger variables
+static volatile bool wifi_fully_connected = false;
+static bool usb_mounted = false;
+static bool auto_trigger_executed = false;
+
+// Conditional printf for verbose mode
+#if VERBOSE_SERIAL
+    #define VPRINTF(...) printf(__VA_ARGS__)
+#else
+    #define VPRINTF(...) ((void)0)
+#endif
 
 int main(void)
 {
@@ -120,28 +156,42 @@ int main(void)
     gpio_put(LED_PIN, 0);
 
     printf("Core 0: GPIO initialized\n");
+    printf("Core 0: SD card will initialize on USB mount\n");
 
-    // Initialize SD card on Core 0
-    if (!init_sd_card())
-    {
-        printf("WARNING: SD card logging disabled\n");
-    }
-
-    // Launch WiFi on Core 1 - THIS IS THE KEY!
+    // Launch WiFi on Core 1
     printf("Core 0: Launching WiFi on Core 1...\n");
     multicore_launch_core1(core1_entry);
 
-    sleep_ms(2000); // Give Core 1 time to init WiFi
+    sleep_ms(2000);
+
+#ifdef AUTO_TRIGGER_HID
+    printf("\n*** AUTO-TRIGGER ENABLED ***\n");
+#else
+    printf("\n*** AUTO-TRIGGER DISABLED ***\n");
+#endif
+
+#ifdef AUTO_POST_ON_SAMPLE
+    printf("*** AUTO-POST ON SAMPLE ENABLED (min interval: %dms) ***\n", MIN_POST_INTERVAL_MS);
+#endif
 
     printf("\nCore 0: System ready - entering main loop\n");
 
-    // Core 0 main loop - USB, HID, SD card
+    // Core 0 main loop
     while (true)
     {
         tud_task();
         led_blinking_task();
         hid_task();
-        check_webhook_button(); // Webhook button check stays on Core 0
+        check_webhook_button();
+
+        // Try to mount SD card after USB is connected (only once)
+        if (usb_mounted && !sd_init_attempted) {
+            sd_init_attempted = true;
+            sleep_ms(100);
+            if (init_sd_card()) {
+                printf("SD card ready for logging\n");
+            }
+        }
 
         uint32_t now = to_ms_since_boot(get_absolute_time());
         if (last_data_time > 0 && (now - last_data_time > DATA_TIMEOUT_MS))
@@ -192,8 +242,17 @@ int main(void)
 
 // [------------------------------------------------------------------------- MSC -------------------------------------------------------------------------]
 
-void tud_mount_cb(void) {}
-void tud_umount_cb(void) {}
+void tud_mount_cb(void) 
+{
+    usb_mounted = true;
+    printf("*** USB MOUNTED ***\n");
+}
+
+void tud_umount_cb(void) 
+{
+    usb_mounted = false;
+}
+
 void tud_suspend_cb(bool remote_wakeup_en) { (void)remote_wakeup_en; }
 void tud_resume_cb(void) {}
 
@@ -267,269 +326,221 @@ static void build_sequence(void)
 void hid_task(void)
 {
     const uint32_t interval_ms = 20;
-    static uint32_t start_ms = 0;
-    static int state = 0;
+    static uint32_t last_update = 0;
+    static bool hid_running = false;
     static int seq_index = 0;
 
-    if (board_millis() - start_ms < interval_ms)
-        return;
-    start_ms = board_millis();
-
-    uint32_t const btn = !gpio_get(HID_BUTTON_PIN);
-
-    switch (state)
-    {
-    case 0:
-        if (btn && tud_hid_ready())
-        {
+#ifdef AUTO_TRIGGER_HID
+    if (!auto_trigger_executed && wifi_fully_connected && usb_mounted) {
+        static uint32_t trigger_start_time = 0;
+        
+        if (trigger_start_time == 0) {
+            trigger_start_time = to_ms_since_boot(get_absolute_time());
+            printf("\n*** WIFI + USB READY - 15 second countdown started ***\n");
+        }
+        
+        uint32_t now = to_ms_since_boot(get_absolute_time());
+        if (now - trigger_start_time >= 15000) {
+            printf("*** AUTO-TRIGGERING HID SEQUENCE ***\n");
             build_sequence();
+            hid_running = true;
             seq_index = 0;
-            state = 1;
+            last_update = now;
+            auto_trigger_executed = true;
         }
-        break;
-
-    case 1:
-        if (tud_hid_ready() && seq_index < seq_len)
-        {
-            key_action_t act = sequence[seq_index++];
-
-            if (act.key || act.modifier)
-            {
-                uint8_t kc[6] = {act.key, 0, 0, 0, 0, 0};
-                int pack_count = 1;
-
-                while (pack_count < 6 && seq_index < seq_len &&
-                       sequence[seq_index].key &&
-                       sequence[seq_index].modifier == act.modifier)
-                {
-                    kc[pack_count] = sequence[seq_index].key;
-                    pack_count++;
-                    seq_index++;
-                }
-
-                tud_hid_keyboard_report(REPORT_ID_KEYBOARD, act.modifier, kc);
-            }
-            else
-            {
-                tud_hid_keyboard_report(REPORT_ID_KEYBOARD, 0, NULL);
-            }
-        }
-        else if (seq_index >= seq_len)
-        {
-            state = 2;
-        }
-        break;
-
-    case 2:
-        if (!btn)
-            state = 0;
-        break;
     }
+#endif
+
+    // Manual trigger
+    static bool last_button_state = true;
+    bool current_state = gpio_get(HID_BUTTON_PIN);
+    static uint32_t debounce_time = 0;
+    uint32_t now_hid = to_ms_since_boot(get_absolute_time());
+
+    if (!current_state && last_button_state) {
+        if (now_hid - debounce_time > 200) {
+            printf("\n>>> GP20 Button Pressed! Starting HID sequence... <<<\n");
+            build_sequence();
+            hid_running = true;
+            seq_index = 0;
+            last_update = now_hid;
+            debounce_time = now_hid;
+        }
+    }
+    last_button_state = current_state;
+
+    if (!hid_running)
+        return;
+
+    if (!tud_hid_ready())
+        return;
+
+    uint32_t now = to_ms_since_boot(get_absolute_time());
+    if (now - last_update < interval_ms)
+        return;
+
+    last_update = now;
+
+    if (seq_index >= seq_len) {
+        hid_running = false;
+        printf("HID sequence completed!\n\n");
+        return;
+    }
+
+    key_action_t action = sequence[seq_index++];
+
+    uint8_t keycode[6] = {0};
+    if (action.key != 0) {
+        keycode[0] = action.key;
+    }
+
+    tud_hid_keyboard_report(REPORT_ID_KEYBOARD, action.modifier, keycode);
 }
 
-void tud_hid_report_complete_cb(uint8_t instance, uint8_t const *report, uint16_t len)
+uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t report_type, uint8_t* buffer, uint16_t reqlen)
 {
-    (void)instance;
-    (void)report;
-    (void)len;
-}
-
-uint16_t tud_hid_get_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_t report_type, uint8_t *buffer, uint16_t reqlen)
-{
-    (void)instance;
-    (void)report_id;
-    (void)report_type;
-    (void)buffer;
-    (void)reqlen;
+    (void) itf; (void) report_id; (void) report_type; (void) buffer; (void) reqlen;
     return 0;
 }
 
-void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_t report_type, uint8_t const *buffer, uint16_t bufsize)
+void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t report_type, uint8_t const* buffer, uint16_t bufsize)
 {
-    (void)instance;
-    (void)report_id;
-    (void)report_type;
-    (void)buffer;
-    (void)bufsize;
+    (void) itf; (void) report_id; (void) report_type; (void) buffer; (void) bufsize;
 }
-
-// [------------------------------------------------------------------------- CDC -------------------------------------------------------------------------]
-
-void process_json_data(char *json)
-{
-    if (!json || strlen(json) == 0)
-        return;
-
-    uint32_t receive_time = to_ms_since_boot(get_absolute_time());
-    health_data_t new_data = {0};
-
-    char *cpu_ptr = strstr(json, "\"cpu\":");
-    char *mem_ptr = strstr(json, "\"memory\":");
-    char *disk_ptr = strstr(json, "\"disk\":");
-    char *temp_ptr = strstr(json, "\"cpu_temp\":");
-    char *net_in_ptr = strstr(json, "\"net_in\":");
-    char *net_out_ptr = strstr(json, "\"net_out\":");
-    char *proc_ptr = strstr(json, "\"processes\":");
-
-    if (cpu_ptr)
-        new_data.cpu = atof(cpu_ptr + 6);
-    if (mem_ptr)
-        new_data.memory = atof(mem_ptr + 9);
-    if (disk_ptr)
-        new_data.disk = atof(disk_ptr + 7);
-    if (temp_ptr)
-    {
-        new_data.cpu_temp = atof(temp_ptr + 11);
-        if (strstr(temp_ptr + 11, "null"))
-            new_data.cpu_temp = 0;
-    }
-    if (net_in_ptr)
-        new_data.net_in = atof(net_in_ptr + 9);
-    if (net_out_ptr)
-        new_data.net_out = atof(net_out_ptr + 10);
-    if (proc_ptr)
-        new_data.processes = atoi(proc_ptr + 12);
-
-    if (cpu_ptr && mem_ptr && disk_ptr)
-    {
-        current_health = new_data;
-        current_health.valid = true;
-        is_connected = true;
-
-        uint32_t time_since_last = (last_data_time > 0) ? (receive_time - last_data_time) : 0;
-        last_data_time = receive_time;
-
-        sample_count++;
-        if (sample_count > 9999)
-            sample_count = 1;
-
-        display_compact_status();
-
-        if (time_since_last > 0)
-        {
-            printf("[TIMING] Gap since last sample: %lu ms\n", time_since_last);
-        }
-    }
-}
-
-void display_compact_status(void)
-{
-    printf("[%04lu] CPU=%5.1f%% | RAM=%5.1f%% | DISK=%5.1f%% | TEMP=%5.1fC | NET=D%6.1f U%6.1f KB/s | PROC=%d\n",
-           sample_count,
-           current_health.cpu,
-           current_health.memory,
-           current_health.disk,
-           current_health.cpu_temp,
-           current_health.net_in,
-           current_health.net_out,
-           current_health.processes);
-}
-
-// [------------------------------------------------------------------------- LED -------------------------------------------------------------------------]
 
 void led_blinking_task(void)
 {
-    static uint32_t last_toggle = 0;
-    uint32_t now = board_millis();
+    static uint32_t blink_start = 0;
+    static bool blink_state = false;
+    const uint32_t interval_ms = 1000;
 
-    if (is_connected)
-    {
-        if (now - last_toggle >= 100)
-        {
-            gpio_put(LED_PIN, !gpio_get(LED_PIN));
-            last_toggle = now;
-        }
-    }
-    else
-    {
-        gpio_put(LED_PIN, 0);
-    }
+    uint32_t now = to_ms_since_boot(get_absolute_time());
+
+    if (now - blink_start < interval_ms)
+        return;
+
+    blink_start = now;
+    blink_state = !blink_state;
+    gpio_put(LED_PIN, blink_state ? 1 : 0);
 }
 
-// [------------------------------------------------------------------------- Wifi -------------------------------------------------------------------------]
+// [------------------------------------------------------------------------- JSON Processing -------------------------------------------------------------------------]
+
+void process_json_data(char *json)
+{
+    // Simple JSON parsing
+    char *cpu_pos = strstr(json, "\"cpu\":");
+    char *mem_pos = strstr(json, "\"memory\":");
+    char *disk_pos = strstr(json, "\"disk\":");
+    char *temp_pos = strstr(json, "\"cpu_temp\":");
+    char *net_in_pos = strstr(json, "\"net_in\":");
+    char *net_out_pos = strstr(json, "\"net_out\":");
+    char *proc_pos = strstr(json, "\"processes\":");
+
+    if (!is_connected) {
+        is_connected = true;
+        printf("[CONNECTED] Starting sample counter\n");
+    }
+
+    if (cpu_pos) current_health.cpu = atof(cpu_pos + 6);
+    if (mem_pos) current_health.memory = atof(mem_pos + 10);
+    if (disk_pos) current_health.disk = atof(disk_pos + 7);
+    if (temp_pos) {
+        char *temp_val = temp_pos + 12;
+        if (strncmp(temp_val, "null", 4) == 0) {
+            current_health.cpu_temp = 0.0;
+        } else {
+            current_health.cpu_temp = atof(temp_val);
+        }
+    }
+    if (net_in_pos) current_health.net_in = atof(net_in_pos + 10);
+    if (net_out_pos) current_health.net_out = atof(net_out_pos + 11);
+    if (proc_pos) current_health.processes = atoi(proc_pos + 13);
+
+    current_health.valid = true;
+    last_data_time = to_ms_since_boot(get_absolute_time());
+    sample_count++;
+
+    // Minimal serial response
+    printf("\r[%4lu] CPU:%5.1f%% MEM:%5.1f%% DSK:%5.1f%%",
+           sample_count,
+           current_health.cpu,
+           current_health.memory,
+           current_health.disk);
+    fflush(stdout);
+
+#ifdef AUTO_POST_ON_SAMPLE
+    // Trigger POST for this sample if enough time has passed
+    uint32_t now = to_ms_since_boot(get_absolute_time());
+    if (!webhook_in_progress && (now - last_post_time >= MIN_POST_INTERVAL_MS)) {
+        webhook_trigger = true;
+        last_post_time = now;
+    }
+#endif
+}
+
+// [------------------------------------------------------------------------- WiFi -------------------------------------------------------------------------]
 
 static bool wifi_connected = false;
 static uint32_t last_wifi_check = 0;
-#define WIFI_CHECK_INTERVAL_MS 10000 // Check every 10 seconds
 
 bool init_wifi(void)
 {
-    printf("=== Starting WiFi Initialization ===\n");
+    printf("Core 1: Initializing WiFi...\n");
 
     if (cyw43_arch_init())
     {
-        printf("ERROR: WiFi init failed\n");
+        printf("Core 1: WiFi init FAILED\n");
         return false;
     }
-    printf("WiFi chip initialized\n");
 
     cyw43_arch_enable_sta_mode();
+    printf("Core 1: WiFi STA mode enabled\n");
 
-    // Reduce WiFi power to avoid current spikes
-    cyw43_wifi_pm(&cyw43_state, CYW43_PERFORMANCE_PM);
+    if (!try_wifi_connect())
+    {
+        printf("Core 1: Initial WiFi connection FAILED\n");
+        return false;
+    }
 
-    printf("Station mode enabled\n");
+    printf("*** WIFI FULLY CONNECTED ***\n");
+    wifi_fully_connected = true;
 
-    return try_wifi_connect();
+    return true;
 }
 
 bool try_wifi_connect(void)
 {
-    printf("Connecting to: %s\n", WIFI_SSID);
-    printf("Please wait...\n");
+    printf("Core 1: Connecting to '%s'...\n", WIFI_SSID);
 
-    int result = cyw43_arch_wifi_connect_timeout_ms(
-        WIFI_SSID,
-        WIFI_PASSWORD,
-        CYW43_AUTH_WPA2_AES_PSK,
-        30000  // 30 second timeout
-    );
+    int link_status = cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA);
+    printf("connect status: ");
+    if (link_status == CYW43_LINK_DOWN) printf("no ip\n");
+    else if (link_status == CYW43_LINK_JOIN) printf("wifi joined\n");
+    else if (link_status == CYW43_LINK_NOIP) printf("no ip\n");
+    else if (link_status == CYW43_LINK_UP) printf("link up\n");
+    else if (link_status == CYW43_LINK_FAIL) printf("failed\n");
+    else if (link_status == CYW43_LINK_NONET) printf("no net\n");
+    else if (link_status == CYW43_LINK_BADAUTH) printf("bad auth\n");
+    else printf("unknown\n");
 
-    // Check detailed status
-    int status = cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA);
-    printf("Link status after connect: %d\n", status);
-    
-    if (result != 0)
+    int connect_result = cyw43_arch_wifi_connect_timeout_ms(
+        WIFI_SSID, WIFI_PASSWORD,
+        CYW43_AUTH_WPA2_AES_PSK, 30000);
+
+    if (connect_result != 0)
     {
-        printf("ERROR: Failed to connect (error code: %d)\n", result);
-        
-        // Detailed error codes
-        switch(result) {
-            case PICO_ERROR_TIMEOUT:
-                printf("  -> Timeout: Check if SSID '%s' exists and is in range\n", WIFI_SSID);
-                break;
-            case PICO_ERROR_GENERIC:
-                printf("  -> Generic error: Check password\n");
-                break;
-            default:
-                printf("  -> Unknown error\n");
-                break;
-        }
-        
-        wifi_connected = false;
+        printf("WiFi: Connection FAILED (error %d)\n", connect_result);
         return false;
     }
 
-    printf("=== WiFi Connected Successfully! ===\n");
+    printf("WiFi: Connected successfully!\n");
 
-    // Print IP address
-    extern cyw43_t cyw43_state;
     uint32_t ip = cyw43_state.netif[0].ip_addr.addr;
-    
-    if (ip == 0) {
-        printf("ERROR: Connected but no IP address assigned!\n");
-        wifi_connected = false;
-        return false;
-    }
-    
-    printf("IP Address: %d.%d.%d.%d\n",
-           ip & 0xFF,
-           (ip >> 8) & 0xFF,
-           (ip >> 16) & 0xFF,
-           (ip >> 24) & 0xFF);
+    printf("WiFi: IP Address: %lu.%lu.%lu.%lu\n",
+           ip & 0xFF, (ip >> 8) & 0xFF, (ip >> 16) & 0xFF, (ip >> 24) & 0xFF);
 
     wifi_connected = true;
-    last_wifi_check = to_ms_since_boot(get_absolute_time());
     return true;
 }
 
@@ -537,84 +548,73 @@ void check_wifi_connection(void)
 {
     uint32_t now = to_ms_since_boot(get_absolute_time());
 
-    // Only check periodically
-    if (now - last_wifi_check < WIFI_CHECK_INTERVAL_MS)
-    {
+    if (now - last_wifi_check < 5000)
         return;
-    }
 
     last_wifi_check = now;
 
-    // Check if we're still connected
     int link_status = cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA);
 
-    // Only reconnect if truly disconnected (not just "no packets")
-    if (link_status == CYW43_LINK_DOWN || link_status == CYW43_LINK_FAIL || link_status == CYW43_LINK_NONET)
+    if (link_status != CYW43_LINK_UP)
     {
         if (wifi_connected)
         {
-            printf("WiFi connection lost! Attempting to reconnect...\n");
+            printf("\nCore 1: WiFi connection lost! Attempting reconnect...\n");
             wifi_connected = false;
+            wifi_fully_connected = false;
         }
 
-        // Try to reconnect
         try_wifi_connect();
     }
-    else if (link_status == CYW43_LINK_UP)
+    else
     {
         if (!wifi_connected)
         {
-            printf("WiFi connection restored!\n");
+            wifi_connected = true;
+            wifi_fully_connected = true;
+            printf("Core 1: WiFi reconnected!\n");
         }
-        wifi_connected = true;
     }
 }
 
-// [------------------------------------------------------------------------- HTTPS Callbacks -------------------------------------------------------------------------]
+// [------------------------------------------------------------------------- HTTPS with Proper Cleanup -------------------------------------------------------------------------]
 
 void dns_callback(const char* name, const ip_addr_t* ipaddr, void* arg)
 {
     if (ipaddr) {
-        printf("DNS resolved: %s -> %s\n", name, ip4addr_ntoa(ipaddr));
-        *((ip_addr_t*)arg) = *ipaddr;
+        ip_addr_t* result = (ip_addr_t*)arg;
+        *result = *ipaddr;
+        VPRINTF("DNS resolved: %s\n", ip4addr_ntoa(ipaddr));
     } else {
-        printf("DNS resolution failed for %s\n", name);
-        ((ip_addr_t*)arg)->addr = 0;
+        VPRINTF("DNS resolution failed\n");
     }
 }
 
 err_t https_connected_callback(void* arg, struct altcp_pcb* tpcb, err_t err)
 {
-    (void)arg;
+    https_state_t* state = (https_state_t*)arg;
     
-    if (err != ERR_OK) {
-        printf("HTTPS connection failed: %d\n", err);
-        return err;
+    if (err == ERR_OK) {
+        state->connected = true;
+        VPRINTF("TLS handshake complete!\n");
+    } else {
+        VPRINTF("Connection failed: %d\n", err);
     }
-
-    printf("HTTPS connection established!\n");
-    https_state.connected = true;
     
     return ERR_OK;
 }
 
 err_t https_recv_callback(void* arg, struct altcp_pcb* tpcb, struct pbuf* p, err_t err)
 {
-    (void)arg;
+    https_state_t* state = (https_state_t*)arg;
     
-    if (err != ERR_OK || p == NULL) {
-        if (p) pbuf_free(p);
-        return err;
+    if (p == NULL) {
+        VPRINTF("Connection closed by server\n");
+        return ERR_OK;
     }
-
-    // Print response
-    struct pbuf* current = p;
-    while (current != NULL) {
-        printf("%.*s", current->len, (char*)current->payload);
-        https_state.bytes_received += current->len;
-        current = current->next;
-    }
-
+    
+    state->bytes_received += p->tot_len;
+    
     altcp_recved(tpcb, p->tot_len);
     pbuf_free(p);
     
@@ -623,146 +623,153 @@ err_t https_recv_callback(void* arg, struct altcp_pcb* tpcb, struct pbuf* p, err
 
 void https_err_callback(void* arg, err_t err)
 {
-    (void)arg;
-    printf("HTTPS error callback: %d\n", err);
-    
-    if (https_state.tls_config) {
-        altcp_tls_free_config(https_state.tls_config);
-        https_state.tls_config = NULL;
-    }
-    
-    https_state.connected = false;
+    VPRINTF("Connection error: %d\n", err);
+    https_state_t* state = (https_state_t*)arg;
+    state->connected = false;
 }
 
-// [------------------------------------------------------------------------- Webhook POST -------------------------------------------------------------------------]
-
-void send_webhook_post(void)
+void send_webhook_post_with_cleanup(health_data_t* data)
 {
-    printf("Start POST...\n");
-    fflush(stdout);
-    if (!wifi_connected)
-    {
-        printf("Cannot send POST - WiFi not connected\n");
+    if (https_state.operation_in_progress) {
+        VPRINTF("Operation already in progress, skipping\n");
         return;
     }
 
-    printf("\n=== Sending HTTPS POST to webhook.site ===\n");
+    webhook_in_progress = true;
+    https_state.operation_in_progress = true;
+    https_state.operation_start_time = to_ms_since_boot(get_absolute_time());
+    
+    // Store a copy of the data
+    https_state.pending_data = *data;
+    
+    printf("POST[%lu]...", sample_count);
+    fflush(stdout);
 
-    // Reset state
-    https_state.connected = false;
-    https_state.request_sent = false;
-    https_state.bytes_received = 0;
-
-    // Step 1: Resolve DNS
-    ip_addr_t server_ip;
-    server_ip.addr = 0;
-
-    printf("Resolving %s...\n", WEBHOOK_HOSTNAME);
-    printf("[Stage] DNS start\n");
+    // Step 1: DNS Resolution
+    ip_addr_t server_ip = {0};
+    VPRINTF("\nResolving %s...\n", WEBHOOK_HOSTNAME);
+    
     err_t dns_err = dns_gethostbyname(WEBHOOK_HOSTNAME, &server_ip, dns_callback, &server_ip);
-    printf("[Stage] DNS result: %d, ip=%s\n", dns_err, ip4addr_ntoa(&server_ip));
-
+    
     if (dns_err == ERR_INPROGRESS) {
-        // Wait for DNS resolution
         int timeout = 0;
-        while (server_ip.addr == 0 && timeout < 100) {
+        while (server_ip.addr == 0 && timeout < 50) {
+            cyw43_arch_poll();
             sleep_ms(100);
             timeout++;
         }
     }
 
     if (server_ip.addr == 0) {
-        printf("DNS resolution failed\n");
+        printf("DNS fail\n");
+        https_state.operation_in_progress = false;
+        webhook_in_progress = false;
         return;
     }
 
-    printf("Resolved to: %s\n", ip4addr_ntoa(&server_ip));
+    VPRINTF("Resolved to: %s\n", ip4addr_ntoa(&server_ip));
 
-    // Step 2: Create mTLS configuration    
+    // Step 2: Create TLS Config (fresh for each connection)
     u8_t ca_cert[] = CA_CERT;
-    u8_t client_cert[] = CLIENT_CERT;
-    // static const u8_t client_key[] = CLIENT_KEY;
-    u8_t client_key[] = CLIENT_KEY;
-
-    printf("[Stage] Creating TLS config\n");
-    // https_state.tls_config = altcp_tls_create_config_client(ca_cert, sizeof(ca_cert)); //code responsible for one way handshake
-    https_state.tls_config = altcp_tls_create_config_client_2wayauth(
-    ca_cert, sizeof(ca_cert),
-    client_key, sizeof(client_key),
-    NULL, 0,                          // or password + length if encrypted key
-    client_cert, sizeof(client_cert)
-    );
-
-
+    https_state.tls_config = altcp_tls_create_config_client(ca_cert, sizeof(ca_cert));
 
     if (!https_state.tls_config) {
-        printf("Failed to create TLS config\n");
+        printf("TLS cfg fail\n");
+        https_state.operation_in_progress = false;
+        webhook_in_progress = false;
         return;
     }
 
-    // Step 3: Create mTLS PCB
-    struct altcp_pcb* pcb = altcp_tls_new(https_state.tls_config, IPADDR_TYPE_V4);
+    // Step 3: Create new PCB
+    https_state.pcb = altcp_tls_new(https_state.tls_config, IPADDR_TYPE_V4);
 
-    if (!pcb) {
-        printf("Failed to create TLS PCB\n");
+    if (!https_state.pcb) {
+        printf("PCB fail\n");
         altcp_tls_free_config(https_state.tls_config);
         https_state.tls_config = NULL;
+        https_state.operation_in_progress = false;
+        webhook_in_progress = false;
         return;
     }
 
     // Step 4: Set SNI hostname
     int mbedtls_err = mbedtls_ssl_set_hostname(
-        &(((altcp_mbedtls_state_t*)(pcb->state))->ssl_context),
+        &(((altcp_mbedtls_state_t*)(https_state.pcb->state))->ssl_context),
         WEBHOOK_HOSTNAME
     );
 
     if (mbedtls_err != 0) {
-        printf("Failed to set SNI hostname\n");
-        altcp_close(pcb);
+        printf("SNI fail\n");
+        altcp_close(https_state.pcb);
         altcp_tls_free_config(https_state.tls_config);
         https_state.tls_config = NULL;
+        https_state.pcb = NULL;
+        https_state.operation_in_progress = false;
+        webhook_in_progress = false;
         return;
     }
 
-    // Step 5: Set up callbacks
-    altcp_arg(pcb, &https_state);
-    altcp_err(pcb, https_err_callback);
-    altcp_recv(pcb, https_recv_callback);
-
-    // Step 6: Connect
-    printf("Connecting to %s:443...\n", WEBHOOK_HOSTNAME);
+    // Step 5: Set callbacks
+    https_state.connected = false;
+    https_state.request_sent = false;
+    https_state.bytes_received = 0;
     
-    err_t connect_err = altcp_connect(pcb, &server_ip, 443, https_connected_callback);
+    altcp_arg(https_state.pcb, &https_state);
+    altcp_err(https_state.pcb, https_err_callback);
+    altcp_recv(https_state.pcb, https_recv_callback);
+
+    VPRINTF("Connecting to %s:443...\n", WEBHOOK_HOSTNAME);
+    
+    // Step 6: Connect
+    err_t connect_err = altcp_connect(https_state.pcb, &server_ip, 443, https_connected_callback);
 
     if (connect_err != ERR_OK) {
-        printf("Connection failed: %d\n", connect_err);
-        altcp_close(pcb);
+        printf("Connect fail:%d\n", connect_err);
+        altcp_close(https_state.pcb);
         altcp_tls_free_config(https_state.tls_config);
         https_state.tls_config = NULL;
+        https_state.pcb = NULL;
+        https_state.operation_in_progress = false;
+        webhook_in_progress = false;
         return;
     }
 
-    // Wait for connection - poll lwIP to process packets
+    // Step 7: Wait for TLS handshake
     int timeout = 0;
-    while (!https_state.connected && timeout < 150) {
-        cyw43_arch_poll();  // Let lwIP process packets
+    while (!https_state.connected && timeout < 100) {
+        cyw43_arch_poll();
         sleep_ms(100);
         timeout++;
     }
 
     if (!https_state.connected) {
-        printf("Connection timeout\n");
-        altcp_close(pcb);
+        printf("Timeout\n");
+        altcp_close(https_state.pcb);
+        altcp_tls_free_config(https_state.tls_config);
+        https_state.tls_config = NULL;
+        https_state.pcb = NULL;
+        https_state.operation_in_progress = false;
+        webhook_in_progress = false;
         return;
     }
 
-    // Step 7: Send HTTPS POST request
+    // Step 8: Build and send request
     char json_body[256];
     int body_len = snprintf(json_body, sizeof(json_body),
-                            "{\"button\":\"GP21 pressed\",\"timestamp\":%lu,\"device\":\"Pico-W\"}",
-                            to_ms_since_boot(get_absolute_time()));
+                            "{\"sample\":%lu,\"timestamp\":%lu,\"device\":\"Pico-W\","
+                            "\"cpu\":%.1f,\"mem\":%.1f,\"disk\":%.1f,\"temp\":%.1f,"
+                            "\"net_in\":%.1f,\"net_out\":%.1f,\"proc\":%d}",
+                            sample_count,
+                            to_ms_since_boot(get_absolute_time()),
+                            https_state.pending_data.cpu,
+                            https_state.pending_data.memory,
+                            https_state.pending_data.disk,
+                            https_state.pending_data.cpu_temp,
+                            https_state.pending_data.net_in,
+                            https_state.pending_data.net_out,
+                            https_state.pending_data.processes);
 
-    char request[512];
+    char request[600];
     int req_len = snprintf(request, sizeof(request),
                            "POST /%s HTTP/1.1\r\n"
                            "Host: %s\r\n"
@@ -773,39 +780,55 @@ void send_webhook_post(void)
                            "%s",
                            WEBHOOK_TOKEN, WEBHOOK_HOSTNAME, body_len, json_body);
 
-    printf("Sending HTTPS request...\n");
+    VPRINTF("Sending request...\n");
     
-    err_t write_err = altcp_write(pcb, request, req_len, TCP_WRITE_FLAG_COPY);
+    err_t write_err = altcp_write(https_state.pcb, request, req_len, TCP_WRITE_FLAG_COPY);
 
     if (write_err == ERR_OK) {
-        altcp_output(pcb);
-        
-        printf("Request sent! Waiting for response...\n");
+        altcp_output(https_state.pcb);
         https_state.request_sent = true;
 
-        // Wait for response - poll lwIP
-        for (int i = 0; i < 30; i++) {
+        // Wait for response (shorter timeout)
+        for (int i = 0; i < 20; i++) {
             cyw43_arch_poll();
             sleep_ms(100);
         }
 
-        // Blink LED to confirm
-        for (int i = 0; i < 6; i++) {
-            gpio_put(LED_PIN, 1);
-            sleep_ms(50);
-            gpio_put(LED_PIN, 0);
-            sleep_ms(50);
-        }
-
-        printf("\nReceived %d bytes\n", https_state.bytes_received);
+        printf("OK(%db)\n", https_state.bytes_received);
+        fflush(stdout);
     } else {
-        printf("Failed to send request: %d\n", write_err);
+        printf("Write fail:%d\n", write_err);
     }
 
-    // Cleanup
-    altcp_close(pcb);
+    // Step 9: CRITICAL - Proper cleanup in correct order
+    // Close the connection
+    if (https_state.pcb != NULL) {
+        altcp_close(https_state.pcb);
+        https_state.pcb = NULL;
+    }
+    
+    // Free TLS config
+    if (https_state.tls_config != NULL) {
+        altcp_tls_free_config(https_state.tls_config);
+        https_state.tls_config = NULL;
+    }
+    
+    // Give lwIP time to clean up
+    for (int i = 0; i < 5; i++) {
+        cyw43_arch_poll();
+        sleep_ms(50);
+    }
 
-    printf("=== HTTPS POST complete ===\n\n");
+    // LED blink confirmation
+    for (int i = 0; i < 3; i++) {
+        gpio_put(LED_PIN, 1);
+        sleep_ms(50);
+        gpio_put(LED_PIN, 0);
+        sleep_ms(50);
+    }
+
+    https_state.operation_in_progress = false;
+    webhook_in_progress = false;
 }
 
 void check_webhook_button(void)
@@ -821,7 +844,7 @@ void check_webhook_button(void)
         if (now - debounce_time > 200)
         {
             printf("\n>>> GP21 Button Pressed! <<<\n");
-            webhook_trigger = true;  // Signal Core 1 to send
+            webhook_trigger = true;
             debounce_time = now;
         }
     }
@@ -837,59 +860,75 @@ void core1_entry(void)
 
     sleep_ms(1000);
 
-    if (init_wifi())
+    bool wifi_init_success = false;
+    int retry_count = 0;
+    const int MAX_RETRIES = 5;
+
+    while (!wifi_init_success && retry_count < MAX_RETRIES)
+    {
+        if (retry_count > 0)
+        {
+            printf("Core 1: Retry attempt %d/%d in 3 seconds...\n", retry_count + 1, MAX_RETRIES);
+            sleep_ms(3000);
+        }
+
+        wifi_init_success = init_wifi();
+        retry_count++;
+    }
+
+    if (wifi_init_success)
     {
         printf("Core 1: WiFi ready!\n");
     }
     else
     {
-        printf("Core 1: WiFi failed\n");
+        printf("Core 1: WiFi failed after %d attempts\n", MAX_RETRIES);
     }
 
-    // Core 1 main loop - handle WiFi tasks AND webhook
+    // Core 1 main loop
     while (true)
     {
+        cyw43_arch_poll();
         check_wifi_connection();
         
-        // Check if Core 0 requested a webhook POST
-        if (webhook_trigger && wifi_connected)
+        // Handle webhook trigger
+        if (webhook_trigger && wifi_connected && !webhook_in_progress)
         {
-            webhook_trigger = false;  // Clear flag
-            send_webhook_post();
+            webhook_trigger = false;
+            send_webhook_post_with_cleanup(&current_health);
         }
         
-        sleep_ms(50);  // Check more frequently for responsiveness
+        sleep_ms(50);
     }
 }
 
 // [------------------------------------------------------------------------- SD Read/Write -------------------------------------------------------------------------]
 
+bool try_sd_mount(void)
+{
+    FRESULT fr = f_mount(&fs, "0:", 1);
+    if (fr == FR_OK) {
+        return true;
+    }
+    
+    sleep_ms(500);
+    fr = f_mount(&fs, "0:", 1);
+    return (fr == FR_OK);
+}
+
 bool init_sd_card(void)
 {
     printf("Initializing SD card...\n");
-
-    // Small delay to ensure SPI bus is stable
     sleep_ms(100);
 
-    // Initialize SD card
-    FRESULT fr = f_mount(&fs, "0:", 1);
-    if (fr != FR_OK)
-    {
-        printf("SD card mount failed: %d\n", fr);
-
-        // Try once more after delay
-        sleep_ms(500);
-        fr = f_mount(&fs, "0:", 1);
-        if (fr != FR_OK)
-        {
-            printf("SD card mount failed again: %d\n", fr);
-            return false;
-        }
+    if (try_sd_mount()) {
+        sd_mounted = true;
+        printf("SD card mounted successfully\n");
+        return true;
     }
 
-    sd_mounted = true;
-    printf("SD card mounted successfully\n");
-    return true;
+    printf("SD card mount failed\n");
+    return false;
 }
 
 void log_disconnect_event(void)
@@ -901,34 +940,29 @@ void log_disconnect_event(void)
     FRESULT fr;
     UINT bytes_written;
 
-    // Open file in append mode, create if doesn't exist
     fr = f_open(&fil, "0:/pico_logs.txt", FA_WRITE | FA_OPEN_APPEND);
     if (fr != FR_OK)
     {
-        printf("Failed to open log file: %d\n", fr);
+        VPRINTF("Failed to open log file: %d\n", fr);
         return;
     }
 
-    // Get timestamp
     uint32_t timestamp = to_ms_since_boot(get_absolute_time());
 
-    // Create log message
     char log_msg[128];
     snprintf(log_msg, sizeof(log_msg),
              "[%lu ms] DISCONNECT - Sample count was %lu\n",
              timestamp, sample_count);
 
-    // Write to file
     fr = f_write(&fil, log_msg, strlen(log_msg), &bytes_written);
     if (fr != FR_OK)
     {
-        printf("Failed to write to log: %d\n", fr);
+        VPRINTF("Failed to write to log: %d\n", fr);
     }
     else
     {
-        printf("Logged disconnect event to SD card\n");
+        VPRINTF("Logged disconnect event to SD card\n");
     }
 
-    // Close file to ensure data is saved
     f_close(&fil);
 }
