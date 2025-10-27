@@ -25,9 +25,6 @@
 #include "mbedtls/ssl.h"
 #include "https_config.h"
 
-#define WIFI_SSID "SINGTEL-93F8"
-#define WIFI_PASSWORD "9gqksHLu9Eq4"
-
 #define HID_BUTTON_PIN 20
 #define WEBHOOK_BUTTON_PIN 21
 #define WIFI_LED_PIN 6

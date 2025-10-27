@@ -4,6 +4,8 @@
 // Webhook.site configuration
 #define WEBHOOK_HOSTNAME "192.168.68.57"
 #define WEBHOOK_TOKEN ""
+#define WIFI_SSID "Aydil"
+#define WIFI_PASSWORD "12345678"
 
 // HTTPS Certificate - ISRG Root X1 (Let's Encrypt Root)
 #define CA_CERT_XXX \
