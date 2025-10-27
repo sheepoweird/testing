@@ -37,27 +37,19 @@
 
 #define WIFI_RECONNECT_DELAY_MS 5000
 
-// ============================================
 // MTLS CONFIGURATION
 // #define MTLS_ENABLED
-// ============================================
 
-// ============================================
 // POST CONFIGURATION
 #define AUTO_POST_ON_SAMPLE
 // Minimum delay between POSTs (milliseconds)
 #define MIN_POST_INTERVAL_MS 6000
-// ============================================
 
-// ============================================
 // SERIAL VERBOSITY CONTROL
 #define VERBOSE_SERIAL 0
-// ============================================
 
-// ============================================
 // AUTO-HID TRIGGER CONFIGURATION
 #define AUTO_TRIGGER_HID
-// ============================================
 
 static FATFS fs;
 static bool sd_mounted = false;
@@ -431,7 +423,7 @@ void process_json_data(char *json)
     sample_count++;
 
     // Minimal serial response
-    printf("\r[%4lu] CPU:%5.1f%% MEM:%5.1f%% DSK:%5.1f%%",
+    printf("\r[%3lu] CPU:%5.1f%% MEM:%5.1f%% DSK:%5.1f%%",
            sample_count,
            current_health.cpu,
            current_health.memory,
@@ -767,7 +759,8 @@ void send_webhook_post_with_cleanup(health_data_t* data)
                            WEBHOOK_TOKEN, WEBHOOK_HOSTNAME, body_len, json_body);
 
     VPRINTF("Sending request...\n");
-    
+
+    // Make this reuse previous connection
     err_t write_err = altcp_write(https_state.pcb, request, req_len, TCP_WRITE_FLAG_COPY);
 
     if (write_err == ERR_OK) {
@@ -780,7 +773,7 @@ void send_webhook_post_with_cleanup(health_data_t* data)
             sleep_ms(100);
         }
 
-        printf("OK(%db)\n", https_state.bytes_received);
+        printf("OK (%db)\n", https_state.bytes_received);
         fflush(stdout);
     } else {
         printf("Write fail:%d\n", write_err);
