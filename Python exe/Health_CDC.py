@@ -15,7 +15,7 @@ class HealthMonitorPico:
         self.interval = interval
         self.running = False
         self.network_history = deque(maxlen=10)
-        self.pico_messages = deque(maxlen=10)  # Keep last 10 Pico messages
+        self.pico_messages = deque(maxlen=20)  # ← NEW: Store last 10 Pico messages
         self.start_time = time.time()
         self.sample_count = 0
         self.serial_connection = None
@@ -43,19 +43,22 @@ class HealthMonitorPico:
         for port in ports:
             # Skip Bluetooth ports completely
             if 'Bluetooth' in port.description.upper() or 'BT' in port.description.upper():
+                print(f"  {port.device}: {port.description} (skipped - Bluetooth)")
                 continue
 
             print(f"  {port.device}: {port.description}")
 
-            # Look for Pico identifiers
+            # Look for Pico identifiers (Priority 1)
             if 'Pico' in port.description or 'RP2040' in port.description:
+                print(f"  └─> Found Pico device!")
                 return port.device
 
-            # Look for USB Serial devices
-            if 'USB' in port.description.upper() and 'Serial' in port.description:
+            # Look for USB Serial devices (Priority 2)
+            if 'USB' in port.description.upper() and ('Serial' in port.description or 'Modem' in port.description):
                 usb_ports.append(port)
 
         if usb_ports:
+            print(f"\n  └─> Auto-selecting: {usb_ports[0].device}")
             return usb_ports[0].device
 
         return None
@@ -67,7 +70,13 @@ class HealthMonitorPico:
 
         if not self.pico_port:
             print("\n❌ Could not find Pico automatically!")
-            self.pico_port = input("Enter COM port (e.g., COM9): ").strip()
+            print("\nAvailable ports:")
+            ports = serial.tools.list_ports.comports()
+            for port in ports:
+                if 'Bluetooth' not in port.description.upper():
+                    print(f"  - {port.device}: {port.description}")
+
+            self.pico_port = input("\nEnter COM port (e.g., COM8): ").strip()
 
             if not self.pico_port:
                 print("No port specified. Exiting.")
@@ -96,6 +105,8 @@ class HealthMonitorPico:
                     line = self.serial_connection.readline().decode('utf-8', errors='ignore').strip()
                     if line:
                         print(f"Pico: {line}")
+                        timestamp = datetime.now().strftime('%H:%M:%S')
+                        self.pico_messages.append(f"[{timestamp}] {line}")
                 except:
                     pass
 
@@ -108,6 +119,7 @@ class HealthMonitorPico:
             return False
         except Exception as e:
             print(f"❌ Could not open serial port: {e}")
+            print(f"   Error details: {type(e).__name__}")
             return False
 
     def get_comprehensive_health_data(self):
@@ -149,7 +161,7 @@ class HealthMonitorPico:
                 'timestamp': time.time()
             })
 
-        # Simplified data for Pico
+        # Simplified data for Pico (NO TEMPERATURE)
         pico_data = {
             'cpu': round(cpu_percent, 1),
             'memory': round(memory.percent, 1),
@@ -188,17 +200,19 @@ class HealthMonitorPico:
 
         except serial.SerialTimeoutException:
             self.write_timeout_count += 1
-            self.pico_messages.append(f"⚠️  Write timeout ({self.write_timeout_count}/{self.max_consecutive_timeouts})")
+            timestamp = datetime.now().strftime('%H:%M:%S')
+            self.pico_messages.append(
+                f"[{timestamp}] ⚠️ Write timeout ({self.write_timeout_count}/{self.max_consecutive_timeouts})")
 
             if self.write_timeout_count >= self.max_consecutive_timeouts:
-                self.pico_messages.append("❌ Too many consecutive timeouts. Pico may be busy.")
-                # Reset counter but continue
+                self.pico_messages.append(f"[{timestamp}] ❌ Too many timeouts. Pico may be busy.")
                 self.write_timeout_count = 0
 
             return False
 
         except Exception as e:
-            self.pico_messages.append(f"❌ Error sending to Pico: {e}")
+            timestamp = datetime.now().strftime('%H:%M:%S')
+            self.pico_messages.append(f"[{timestamp}] ❌ Send error: {e}")
             return False
 
     def read_pico_response(self, timeout_ms=100):
@@ -216,7 +230,7 @@ class HealthMonitorPico:
                 try:
                     line = self.serial_connection.readline().decode('utf-8', errors='ignore').strip()
                     if line:
-                        # Add timestamp to message
+                        # Add ALL messages to the log with timestamp
                         timestamp = datetime.now().strftime('%H:%M:%S')
                         self.pico_messages.append(f"[{timestamp}] {line}")
                 except:
@@ -239,20 +253,21 @@ class HealthMonitorPico:
                 f.flush()
 
         except Exception as e:
-            self.pico_messages.append(f"Error writing to log: {e}")
+            timestamp = datetime.now().strftime('%H:%M:%S')
+            self.pico_messages.append(f"[{timestamp}] Error writing log: {e}")
 
     def print_status(self, data):
         """Print current status to console with persistent Pico message log"""
         # Clear screen
         os.system('cls' if os.name == 'nt' else 'clear')
 
-        # === STATIC HEADER SECTION (stays the same) ===
+        # === STATIC HEADER SECTION ===
         print("=" * 70)
         print("  PC HEALTH MONITOR - PICO CDC MODE")
         print("=" * 70)
         print(f"Sample #{self.sample_count} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"Connected to: {self.pico_port}")
-        print(f"Logging to: {os.path.abspath(self.log_file)}")
+        print(f"Logging to: {os.path.basename(self.log_file)}")
         print(f"Runtime: {(time.time() - self.start_time) / 60:.1f} minutes")
         print("-" * 70)
 
@@ -267,28 +282,22 @@ class HealthMonitorPico:
         print(f"NET:  ↓{data['net_in']:6.1f} KB/s | ↑{data['net_out']:6.1f} KB/s")
         print(f"PROC: {data['processes']} processes")
 
-        if self.write_timeout_count > 0:
-            print(f"\n⚠️  Write timeouts: {self.write_timeout_count}")
-
         print("-" * 70)
-        print(f"JSON sent: {json.dumps(data)[:65]}...")
+        print(f"JSON: {json.dumps(data)[:65]}...")
 
-        print("\nPress Ctrl+C to stop monitoring...")
-        print("\nNote: Pico may be slow to respond during webhook POSTs")
-
-        # === PICO MESSAGE LOG SECTION (last 10 messages) ===
+        # === PICO MESSAGE LOG SECTION (LAST 20 MESSAGES) ===
         print("\n" + "=" * 70)
-        print("  PICO MESSAGES (Last 10)")
+        print("  PICO MESSAGES (Last 20)")
         print("=" * 70)
 
         if self.pico_messages:
             for msg in self.pico_messages:
-                print(msg)
+                print(f"  {msg}")
         else:
             print("  (No messages yet)")
 
         print("=" * 70)
-        print("\nPress Ctrl+C to stop monitoring...")
+        print("\nPress Ctrl+C to stop | Interval: {}s".format(self.interval))
 
     def run(self):
         """Main monitoring loop"""
@@ -330,7 +339,7 @@ class HealthMonitorPico:
                 # Send to Pico (non-blocking, continues even on timeout)
                 send_success = self.send_to_pico(health_data)
 
-                # Read any response from Pico (with short timeout)
+                # Read any response from Pico FIRST (before display)
                 if send_success:
                     time.sleep(0.1)
                     self.read_pico_response(timeout_ms=200)
