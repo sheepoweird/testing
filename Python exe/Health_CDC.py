@@ -10,7 +10,7 @@ from collections import deque
 
 
 class HealthMonitorPico:
-    def __init__(self, pico_port=None, interval=15, log_file="health_monitor.txt"):
+    def __init__(self, pico_port=None, interval=5, log_file="health_monitor.txt"):
         self.pico_port = pico_port
         self.interval = interval
         self.running = False
@@ -389,7 +389,7 @@ def main():
     parser = argparse.ArgumentParser(description='PC Health Monitor with Pico CDC')
     parser.add_argument('--port', '-p', default=None,
                         help='COM port (e.g., COM9). Auto-detect if not specified')
-    parser.add_argument('--interval', '-i', type=int, default=5,
+    parser.add_argument('--interval', '-i', type=int, default=15,
                         help='Monitoring interval in seconds (default: 5)')
     parser.add_argument('--file', '-f', default='health_monitor.txt',
                         help='Log file name (default: health_monitor.txt)')

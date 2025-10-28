@@ -29,7 +29,7 @@
 #define WEBHOOK_BUTTON_PIN 21
 #define WIFI_LED_PIN 6
 #define RX_BUFFER_SIZE 512
-#define DATA_TIMEOUT_MS 10000
+#define DATA_TIMEOUT_MS 20000
 #define MAX_SEQ 512
 
 #define WIFI_RECONNECT_DELAY_MS 5000
@@ -217,6 +217,7 @@ void tud_mount_cb(void)
 {
     sleep_ms(5000);
     usb_mounted = true;
+    sleep_ms(5000);
     printf("*** USB MOUNTED ***\n");
 }
 
@@ -387,109 +388,46 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t rep
 
 void process_json_data(char *json)
 {
-    VPRINTF("Parsing JSON (%d bytes)\n", strlen(json));
+    // Simple JSON parsing
+    char *cpu_pos = strstr(json, "\"cpu\":");
+    char *mem_pos = strstr(json, "\"memory\":");
+    char *disk_pos = strstr(json, "\"disk\":");
+    char *net_in_pos = strstr(json, "\"net_in\":");
+    char *net_out_pos = strstr(json, "\"net_out\":");
+    char *proc_pos = strstr(json, "\"processes\":");
 
-    // Create a working copy
-    char json_copy[RX_BUFFER_SIZE];
-    strncpy(json_copy, json, RX_BUFFER_SIZE - 1);
-    json_copy[RX_BUFFER_SIZE - 1] = '\0';
-
-    health_data_t new_data = {0};
-    bool parse_success = true;
-
-    // Parse each field
-    char *ptr = json_copy;
-
-    // CPU
-    char *cpu_str = strstr(ptr, "\"cpu\":");
-    if (cpu_str) {
-        new_data.cpu = atof(cpu_str + 6);
-    } else {
-        parse_success = false;
+    if (!is_connected) {
+        is_connected = true;
+        printf("[CONNECTED] Starting sample counter\n");
     }
 
-    // Memory
-    char *mem_str = strstr(ptr, "\"memory\":");
-    if (mem_str) {
-        new_data.memory = atof(mem_str + 9);
-    } else {
-        parse_success = false;
+    if (cpu_pos) current_health.cpu = atof(cpu_pos + 6);
+    if (mem_pos) current_health.memory = atof(mem_pos + 10);
+    if (disk_pos) current_health.disk = atof(disk_pos + 7);
+    if (net_in_pos) current_health.net_in = atof(net_in_pos + 10);
+    if (net_out_pos) current_health.net_out = atof(net_out_pos + 11);
+    if (proc_pos) current_health.processes = atoi(proc_pos + 13);
+
+    current_health.valid = true;
+    last_data_time = to_ms_since_boot(get_absolute_time());
+    sample_count++;
+
+    // Minimal serial response
+    printf("\r[%3lu] CPU:%5.1f%% MEM:%5.1f%% DSK:%5.1f%%\n",
+           sample_count,
+           current_health.cpu,
+           current_health.memory,
+           current_health.disk);
+    fflush(stdout);
+
+#ifdef AUTO_POST_ON_SAMPLE
+    // Trigger POST for this sample if enough time has passed
+    uint32_t now = to_ms_since_boot(get_absolute_time());
+    if (!webhook_in_progress && (now - last_post_time >= MIN_POST_INTERVAL_MS)) {
+        webhook_trigger = true;
+        last_post_time = now;
     }
-
-    // Disk
-    char *disk_str = strstr(ptr, "\"disk\":");
-    if (disk_str) {
-        new_data.disk = atof(disk_str + 7);
-    } else {
-        parse_success = false;
-    }
-
-    // Network In
-    char *net_in_str = strstr(ptr, "\"net_in\":");
-    if (net_in_str) {
-        new_data.net_in = atof(net_in_str + 9);
-    } else {
-        parse_success = false;
-    }
-
-    // Network Out
-    char *net_out_str = strstr(ptr, "\"net_out\":");
-    if (net_out_str) {
-        new_data.net_out = atof(net_out_str + 10);
-    } else {
-        parse_success = false;
-    }
-
-    // Processes
-    char *proc_str = strstr(ptr, "\"processes\":");
-    if (proc_str) {
-        new_data.processes = atoi(proc_str + 12);
-    } else {
-        parse_success = false;
-    }
-
-    if (parse_success)
-    {
-        current_health = new_data;
-        current_health.valid = true;
-        last_data_time = to_ms_since_boot(get_absolute_time());
-        
-        if (!is_connected)
-        {
-            is_connected = true;
-            printf("\n[CONNECTED] Starting sample counter\n");
-        }
-
-        sample_count++;
-
-        // Compact status display
-        printf("[%04lu] CPU=%.1f%% RAM=%.1f%% DISK=%.1f%% NET=↓%.1f↑%.1f KB/s PROC=%d\n",
-               sample_count,
-               current_health.cpu,
-               current_health.memory,
-               current_health.disk,
-               current_health.net_in,
-               current_health.net_out,
-               current_health.processes);
-        fflush(stdout);
-
-        // Auto-trigger webhook POST if enabled
-        #ifdef AUTO_POST_ON_SAMPLE
-        uint32_t now = to_ms_since_boot(get_absolute_time());
-        if ((now - last_post_time) >= MIN_POST_INTERVAL_MS)
-        {
-            if (wifi_connected && !webhook_in_progress)
-            {
-                webhook_trigger = true;
-                last_post_time = now;
-            }
-        }
-        #endif
-    }
-    else
-    {
-        VPRINTF("JSON parse failed\n");
-    }
+#endif
 }
 
 // [------------------------------------------------------------------------- WiFi -------------------------------------------------------------------------]
@@ -655,7 +593,7 @@ void send_webhook_post_with_cleanup(health_data_t* data)
     // Store a copy of the data
     https_state.pending_data = *data;
     
-    printf("POST[%lu]...", sample_count);
+    printf("POST[%lu]...\n", sample_count);
     fflush(stdout);
 
     // Step 1: DNS Resolution
@@ -1042,10 +980,6 @@ void log_disconnect_event(void)
 // LED 9 Write to server Fail (blinking only else off)
 
 // remove FATFS (no longer being used)
-
-// Add SD card listener when not inserted (auto check if SD card is inserted and retry)
-
-// Remove temperature from from python code/pico
 
 
 
