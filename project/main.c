@@ -433,7 +433,9 @@ void process_json_data(char *json)
 // [------------------------------------------------------------------------- WiFi -------------------------------------------------------------------------]
 
 static bool wifi_connected = false;
+static bool reconnect_pending = false;
 static uint32_t last_wifi_check = 0;
+static uint32_t wifi_disconnect_time = 0;
 
 bool init_wifi(void)
 {
@@ -482,6 +484,7 @@ bool try_wifi_connect(void)
     if (connect_result != 0)
     {
         printf("WiFi: Connection FAILED (error %d)\n", connect_result);
+        wifi_connected = false;
         return false;
     }
 
@@ -499,6 +502,7 @@ void check_wifi_connection(void)
 {
     uint32_t now = to_ms_since_boot(get_absolute_time());
 
+    // Check connection status every 5 seconds
     if (now - last_wifi_check < 5000)
         return;
 
@@ -510,12 +514,29 @@ void check_wifi_connection(void)
     {
         if (wifi_connected)
         {
-            printf("\nCore 1: WiFi connection lost! Attempting reconnect...\n");
+            printf("\nCore 1: WiFi connection lost!\n");
             wifi_connected = false;
             wifi_fully_connected = false;
+            wifi_disconnect_time = now;
+            reconnect_pending = true;
         }
-
-        try_wifi_connect();
+        else if (reconnect_pending && (now - wifi_disconnect_time >= WIFI_RECONNECT_DELAY_MS))
+        {
+            // Time to attempt reconnect
+            printf("Core 1: Attempting reconnection...\n");
+            reconnect_pending = false;
+            
+            if (try_wifi_connect())
+            {
+                printf("Core 1: WiFi reconnected successfully!\n");
+            }
+            else
+            {
+                // Failed, schedule another attempt
+                wifi_disconnect_time = now;
+                reconnect_pending = true;
+            }
+        }
     }
     else
     {
@@ -523,7 +544,8 @@ void check_wifi_connection(void)
         {
             wifi_connected = true;
             wifi_fully_connected = true;
-            printf("Core 1: WiFi reconnected!\n");
+            reconnect_pending = false;
+            printf("Core 1: WiFi link restored!\n");
         }
     }
 }
@@ -867,25 +889,23 @@ void core1_entry(void)
         cyw43_arch_poll();
         check_wifi_connection();
         
-        // If WiFi disconnected, attempt to reconnect
-        if (!wifi_connected)
+        // LED behavior based on connection state
+        if (wifi_connected)
         {
-            printf("Core 1: WiFi disconnected, attempting reconnection...\n");
-            gpio_put(WIFI_LED_PIN, 0);  // Turn off LED during reconnection
-            
-            // Blink during delay
-            int blink_cycles = WIFI_RECONNECT_DELAY_MS / 500;
-            for (int i = 0; i < blink_cycles; i++) {
-                gpio_put(WIFI_LED_PIN, 1);
-                sleep_ms(250);
-                gpio_put(WIFI_LED_PIN, 0);
-                sleep_ms(250);
-            }
-            
-            // Attempt reconnection
-            if (try_wifi_connect()) {
-                gpio_put(WIFI_LED_PIN, 1);  // Turn LED back on when connected
-            }
+            // Solid ON when connected
+            gpio_put(WIFI_LED_PIN, 1);
+        }
+        else if (reconnect_pending)
+        {
+            // Slow blink while waiting to reconnect
+            uint32_t now = to_ms_since_boot(get_absolute_time());
+            gpio_put(WIFI_LED_PIN, ((now / 500) % 2) == 0);
+        }
+        else
+        {
+            // Fast blink during reconnection attempt
+            uint32_t now = to_ms_since_boot(get_absolute_time());
+            gpio_put(WIFI_LED_PIN, ((now / 100) % 2) == 0);
         }
         
         // Handle webhook trigger
