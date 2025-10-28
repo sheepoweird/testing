@@ -14,7 +14,7 @@ endif()
 # ====================================================================================
 cmake_minimum_required(VERSION 3.13...3.27)
 
-set(PICO_SDK_PATH "C:/Users/aydil/.pico-sdk/sdk/2.2.0")
+set(PICO_SDK_PATH "C:/Users/piers/pico-sdk")
 
 set(PICO_BOARD pico_w CACHE STRING "Board type")
 
@@ -58,7 +58,6 @@ target_compile_definitions(${PROGRAM_NAME} PUBLIC
     PARAM_ASSERTIONS_ENABLE_ALL=1 
     PICO_MALLOC_PANIC=1
     PICO_USE_STACK_GUARDS=1
-    SD_USE_SPI=1
 
     USE_PRINTF
     USE_DBG_PRINTF
