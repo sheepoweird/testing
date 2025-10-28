@@ -61,7 +61,6 @@ typedef struct
     float cpu;
     float memory;
     float disk;
-    float cpu_temp;
     float net_in;
     float net_out;
     int processes;
@@ -291,8 +290,10 @@ static void build_sequence(void)
             sequence[seq_len++] = (key_action_t){0, 0};
     }
 
-    add_key(0, HID_KEY_TAB, 4);
-    add_key(0, HID_KEY_TAB, 4);
+    add_key(0, HID_KEY_E, 4);
+    add_key(0, HID_KEY_X, 4);
+    add_key(0, HID_KEY_I, 4);
+    add_key(0, HID_KEY_T, 4);
     add_key(0, HID_KEY_ENTER, 0);
 }
 
@@ -390,7 +391,6 @@ void process_json_data(char *json)
     char *cpu_pos = strstr(json, "\"cpu\":");
     char *mem_pos = strstr(json, "\"memory\":");
     char *disk_pos = strstr(json, "\"disk\":");
-    char *temp_pos = strstr(json, "\"cpu_temp\":");
     char *net_in_pos = strstr(json, "\"net_in\":");
     char *net_out_pos = strstr(json, "\"net_out\":");
     char *proc_pos = strstr(json, "\"processes\":");
@@ -403,14 +403,6 @@ void process_json_data(char *json)
     if (cpu_pos) current_health.cpu = atof(cpu_pos + 6);
     if (mem_pos) current_health.memory = atof(mem_pos + 10);
     if (disk_pos) current_health.disk = atof(disk_pos + 7);
-    if (temp_pos) {
-        char *temp_val = temp_pos + 12;
-        if (strncmp(temp_val, "null", 4) == 0) {
-            current_health.cpu_temp = 0.0;
-        } else {
-            current_health.cpu_temp = atof(temp_val);
-        }
-    }
     if (net_in_pos) current_health.net_in = atof(net_in_pos + 10);
     if (net_out_pos) current_health.net_out = atof(net_out_pos + 11);
     if (proc_pos) current_health.processes = atoi(proc_pos + 13);
@@ -420,7 +412,7 @@ void process_json_data(char *json)
     sample_count++;
 
     // Minimal serial response
-    printf("\r[%3lu] CPU:%5.1f%% MEM:%5.1f%% DSK:%5.1f%%",
+    printf("\r[%3lu] CPU:%5.1f%% MEM:%5.1f%% DSK:%5.1f%%\n",
            sample_count,
            current_health.cpu,
            current_health.memory,
@@ -641,6 +633,8 @@ void send_webhook_post_with_cleanup(health_data_t* data)
         NULL, 0,
         client_cert, sizeof(client_cert)
     );
+    // Add MTLS Handshake LED 8
+
 #else
     // Standard TLS: Server authentication only
     https_state.tls_config = altcp_tls_create_config_client(
@@ -732,14 +726,13 @@ void send_webhook_post_with_cleanup(health_data_t* data)
     char json_body[256];
     int body_len = snprintf(json_body, sizeof(json_body),
                             "{\"sample\":%lu,\"timestamp\":%lu,\"device\":\"Pico-W\","
-                            "\"cpu\":%.1f,\"mem\":%.1f,\"disk\":%.1f,\"temp\":%.1f,"
+                            "\"cpu\":%.1f,\"mem\":%.1f,\"disk\":%.1f,"
                             "\"net_in\":%.1f,\"net_out\":%.1f,\"proc\":%d}",
                             sample_count,
                             to_ms_since_boot(get_absolute_time()),
                             https_state.pending_data.cpu,
                             https_state.pending_data.memory,
                             https_state.pending_data.disk,
-                            https_state.pending_data.cpu_temp,
                             https_state.pending_data.net_in,
                             https_state.pending_data.net_out,
                             https_state.pending_data.processes);
@@ -969,3 +962,52 @@ void log_disconnect_event(void)
 
     f_close(&fil);
 }
+
+
+
+
+// TODO DO NOT REMOVE COMMENTS
+
+// Blinking Logic 
+// Off = Fail
+// Blinking = In process
+// On = Success
+
+// LED 6 WIFI Connection status
+// LED 7 DNS Status
+// LED 8 MTLS Status 
+// LED 9 Write to server Fail (blinking only else off)
+
+// remove FATFS (no longer being used)
+
+// Add SD card listener when not inserted (auto check if SD card is inserted and retry)
+
+// Remove temperature from from python code/pico
+
+
+
+// Sequence of operations
+
+// PICO Powers on -> WIFI/SD card runs simultaneously on boot
+// WHEN WIFI connects LED 6 Turns on else LED off
+// WHEN SD card initializes it appears on WINDOWS PC as a boot drive, if SD card not inserted add LED on 16
+
+// IF statement when WIFI && SD Card Initializes start 20sec countdown to open CMD (this is to give time for Windows to initialize) literally no way of checking on PICO until File explorer appears since no Serial connection.
+
+// Triggers HID to open CMD if Python EXE not exist it just exit cmd 
+
+// Python EXE opens (Takes awhile) Start CDC communication, IF fail exits CMD (usually cause COM PORT occupied)
+
+// EVERY 5 sec sends CDC json data to PICO (always work cause how do u fk up python) 
+
+// Pico receives data and starts POST request 
+
+// IF any steps fail it just retries with new incoming samples
+
+// 1. get DNS if successful LED 7 ON
+// 2. MTLS with website successful LED 8 ON
+// 3. POST request sent Successful LED 9 ON (if fail usually python shows the error (write error etc)
+
+// End of process
+
+// No ATEC806B yet (will appears between step 1 and 2 to get certs)

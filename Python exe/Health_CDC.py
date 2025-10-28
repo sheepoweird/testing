@@ -10,11 +10,12 @@ from collections import deque
 
 
 class HealthMonitorPico:
-    def __init__(self, pico_port=None, interval=5, log_file="health_monitor.txt"):
+    def __init__(self, pico_port=None, interval=15, log_file="health_monitor.txt"):
         self.pico_port = pico_port
         self.interval = interval
         self.running = False
         self.network_history = deque(maxlen=10)
+        self.pico_messages = deque(maxlen=10)  # Keep last 10 Pico messages
         self.start_time = time.time()
         self.sample_count = 0
         self.serial_connection = None
@@ -76,13 +77,11 @@ class HealthMonitorPico:
 
         try:
             print(f"Opening {self.pico_port}...")
-            # Increased write timeout and added better buffering
             self.serial_connection = serial.Serial(
                 self.pico_port,
                 115200,
                 timeout=1,
-                write_timeout=2.0,  # Increased from default
-                # Use larger buffers
+                write_timeout=2.0,
                 xonxoff=False,
                 rtscts=False,
                 dsrdtr=False
@@ -111,46 +110,11 @@ class HealthMonitorPico:
             print(f"❌ Could not open serial port: {e}")
             return False
 
-    def get_cpu_temperature(self):
-        """Try to get CPU temperature (platform dependent)"""
-        try:
-            thermal_paths = [
-                "/sys/class/thermal/thermal_zone0/temp",
-                "/sys/class/thermal/thermal_zone1/temp",
-                "/sys/class/hwmon/hwmon0/temp1_input",
-                "/sys/class/hwmon/hwmon1/temp1_input"
-            ]
-
-            for path in thermal_paths:
-                try:
-                    with open(path, 'r') as f:
-                        temp = int(f.read().strip())
-                        if temp > 1000:
-                            temp = temp / 1000.0
-                        if 20 <= temp <= 120:
-                            return round(temp, 1)
-                except:
-                    continue
-
-            if hasattr(psutil, 'sensors_temperatures'):
-                temps = psutil.sensors_temperatures()
-                for name, entries in temps.items():
-                    if 'cpu' in name.lower() or 'core' in name.lower():
-                        for entry in entries:
-                            if 20 <= entry.current <= 120:
-                                return round(entry.current, 1)
-
-        except Exception:
-            pass
-
-        return None
-
     def get_comprehensive_health_data(self):
         """Collect detailed system health information"""
 
         # CPU metrics
         cpu_percent = psutil.cpu_percent(interval=1, percpu=False)
-        cpu_temp = self.get_cpu_temperature()
 
         # Memory metrics
         memory = psutil.virtual_memory()
@@ -190,7 +154,6 @@ class HealthMonitorPico:
             'cpu': round(cpu_percent, 1),
             'memory': round(memory.percent, 1),
             'disk': round((disk_usage.used / disk_usage.total) * 100, 1),
-            'cpu_temp': cpu_temp,
             'net_in': round(network_speed_in, 1),
             'net_out': round(network_speed_out, 1),
             'processes': total_processes,
@@ -209,9 +172,7 @@ class HealthMonitorPico:
             json_data = json.dumps(data)
 
             # Check if there's too much data waiting to be read
-            # This indicates the Pico might be busy
             if self.serial_connection.in_waiting > 1000:
-                # Clear some of the buffer
                 try:
                     self.serial_connection.read(self.serial_connection.in_waiting)
                 except:
@@ -227,18 +188,17 @@ class HealthMonitorPico:
 
         except serial.SerialTimeoutException:
             self.write_timeout_count += 1
-            print(f"\n⚠️  Write timeout ({self.write_timeout_count}/{self.max_consecutive_timeouts})")
+            self.pico_messages.append(f"⚠️  Write timeout ({self.write_timeout_count}/{self.max_consecutive_timeouts})")
 
             if self.write_timeout_count >= self.max_consecutive_timeouts:
-                print("❌ Too many consecutive timeouts. Pico may be busy with network operations.")
-                print("   Continuing to monitor...")
+                self.pico_messages.append("❌ Too many consecutive timeouts. Pico may be busy.")
                 # Reset counter but continue
                 self.write_timeout_count = 0
 
             return False
 
         except Exception as e:
-            print(f"❌ Error sending to Pico: {e}")
+            self.pico_messages.append(f"❌ Error sending to Pico: {e}")
             return False
 
     def read_pico_response(self, timeout_ms=100):
@@ -256,9 +216,9 @@ class HealthMonitorPico:
                 try:
                     line = self.serial_connection.readline().decode('utf-8', errors='ignore').strip()
                     if line:
-                        # Only print non-compact status lines
-                        if not line.startswith('[') or 'Button' in line or 'POST' in line:
-                            print(f"  Pico: {line}")
+                        # Add timestamp to message
+                        timestamp = datetime.now().strftime('%H:%M:%S')
+                        self.pico_messages.append(f"[{timestamp}] {line}")
                 except:
                     break
         except:
@@ -271,7 +231,7 @@ class HealthMonitorPico:
                 timestamp = datetime.now().isoformat()
                 f.write(f"[{self.sample_count:04d}] {timestamp} | ")
                 f.write(f"CPU={data['cpu']:5.1f}% | RAM={data['memory']:5.1f}% | ")
-                f.write(f"DISK={data['disk']:5.1f}% | TEMP={data['cpu_temp'] or 0:5.1f}°C | ")
+                f.write(f"DISK={data['disk']:5.1f}% | ")
                 f.write(f"NET=↓{data['net_in']:6.1f}↑{data['net_out']:6.1f} KB/s | ")
                 f.write(f"PROC={data['processes']}\n")
                 f.write(f"JSON: {json.dumps(data)}\n")
@@ -279,48 +239,62 @@ class HealthMonitorPico:
                 f.flush()
 
         except Exception as e:
-            print(f"Error writing to log file: {e}")
+            self.pico_messages.append(f"Error writing to log: {e}")
 
     def print_status(self, data):
-        """Print current status to console"""
+        """Print current status to console with persistent Pico message log"""
         # Clear screen
         os.system('cls' if os.name == 'nt' else 'clear')
 
-        print("PC HEALTH MONITOR - PICO CDC MODE")
-        print("=" * 60)
+        # === STATIC HEADER SECTION (stays the same) ===
+        print("=" * 70)
+        print("  PC HEALTH MONITOR - PICO CDC MODE")
+        print("=" * 70)
         print(f"Sample #{self.sample_count} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"Connected to: {self.pico_port}")
         print(f"Logging to: {os.path.abspath(self.log_file)}")
         print(f"Runtime: {(time.time() - self.start_time) / 60:.1f} minutes")
-        print("-" * 60)
+        print("-" * 70)
 
+        # === HEALTH DATA SECTION ===
         cpu = data['cpu']
         mem = data['memory']
         disk = data['disk']
-        temp = data['cpu_temp'] or 0
 
         print(f"CPU:  {cpu:5.1f}% {'🔥' if cpu > 80 else '✅'}")
         print(f"RAM:  {mem:5.1f}% {'🔥' if mem > 85 else '✅'}")
         print(f"DISK: {disk:5.1f}% {'🔥' if disk > 90 else '✅'}")
-        if temp > 0:
-            print(f"TEMP: {temp:5.1f}°C {'🔥' if temp > 80 else '✅'}")
-
         print(f"NET:  ↓{data['net_in']:6.1f} KB/s | ↑{data['net_out']:6.1f} KB/s")
         print(f"PROC: {data['processes']} processes")
 
         if self.write_timeout_count > 0:
             print(f"\n⚠️  Write timeouts: {self.write_timeout_count}")
 
-        print("-" * 60)
-        print(f"JSON sent: {json.dumps(data)[:80]}...")
+        print("-" * 70)
+        print(f"JSON sent: {json.dumps(data)[:65]}...")
+
         print("\nPress Ctrl+C to stop monitoring...")
         print("\nNote: Pico may be slow to respond during webhook POSTs")
 
+        # === PICO MESSAGE LOG SECTION (last 10 messages) ===
+        print("\n" + "=" * 70)
+        print("  PICO MESSAGES (Last 10)")
+        print("=" * 70)
+
+        if self.pico_messages:
+            for msg in self.pico_messages:
+                print(msg)
+        else:
+            print("  (No messages yet)")
+
+        print("=" * 70)
+        print("\nPress Ctrl+C to stop monitoring...")
+
     def run(self):
         """Main monitoring loop"""
-        print("=" * 60)
+        print("=" * 70)
         print("  PC HEALTH MONITOR -> PICO CDC")
-        print("=" * 60)
+        print("=" * 70)
         print()
 
         if not self.connect_to_pico():
@@ -356,13 +330,13 @@ class HealthMonitorPico:
                 # Send to Pico (non-blocking, continues even on timeout)
                 send_success = self.send_to_pico(health_data)
 
-                # Display status
-                self.print_status(health_data)
-
                 # Read any response from Pico (with short timeout)
                 if send_success:
                     time.sleep(0.1)
                     self.read_pico_response(timeout_ms=200)
+
+                # Display status (this now includes persistent Pico messages)
+                self.print_status(health_data)
 
                 # Wait for next interval
                 time.sleep(self.interval)
