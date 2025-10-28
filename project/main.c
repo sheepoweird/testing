@@ -8,8 +8,6 @@
 #include "hardware/gpio.h"
 #include "hid_config.h"
 
-#include "ff.h"
-
 #include "pico/cyw43_arch.h"
 #include "pico/multicore.h"
 #include "lwip/altcp_tcp.h"
@@ -32,7 +30,6 @@
 #define RX_BUFFER_SIZE 512
 #define MAX_SEQ 512
 
-
 #define DATA_TIMEOUT_MS 20000
 #define WIFI_RECONNECT_DELAY_MS 5000
 
@@ -50,9 +47,6 @@
 // AUTO-HID TRIGGER CONFIGURATION
 #define AUTO_TRIGGER_HID
 
-static FATFS fs;
-static bool sd_mounted = false;
-static bool sd_init_attempted = false;
 
 char rx_buffer[RX_BUFFER_SIZE];
 int rx_index = 0;
@@ -158,15 +152,6 @@ int main(void)
     {
         tud_task();
         hid_task();
-
-        // Try to mount SD card after USB is connected (only once)
-        if (usb_mounted && !sd_init_attempted) {
-            sd_init_attempted = true;
-            sleep_ms(100);
-            if (init_sd_card()) {
-                printf("SD card ready\n");
-            }
-        }
 
         int c = getchar_timeout_us(0);
 
@@ -427,10 +412,20 @@ static bool wifi_connected = false;
 static bool reconnect_pending = false;
 static uint32_t last_wifi_check = 0;
 static uint32_t wifi_disconnect_time = 0;
+static bool cyw43_initialized = false;
 
 bool init_wifi(void)
 {
     printf("Core 1: Initializing WiFi...\n");
+
+    // Deinit first if already initialized to prevent bus errors
+    if (cyw43_initialized)
+    {
+        printf("Core 1: Deinitializing previous WiFi instance...\n");
+        cyw43_arch_deinit();
+        cyw43_initialized = false;
+        sleep_ms(1000);  // Give hardware time to reset
+    }
 
     if (cyw43_arch_init())
     {
@@ -438,12 +433,15 @@ bool init_wifi(void)
         return false;
     }
 
+    cyw43_initialized = true;
     cyw43_arch_enable_sta_mode();
     printf("Core 1: WiFi STA mode enabled\n");
 
     if (!try_wifi_connect())
     {
         printf("Core 1: Initial WiFi connection FAILED\n");
+        cyw43_arch_deinit();
+        cyw43_initialized = false;
         return false;
     }
 
@@ -493,6 +491,10 @@ void check_wifi_connection(void)
 {
     uint32_t now = to_ms_since_boot(get_absolute_time());
 
+    // Only check if CYW43 is initialized to prevent crashes
+    if (!cyw43_initialized)
+        return;
+
     // Check connection status every 5 seconds
     if (now - last_wifi_check < 5000)
         return;
@@ -526,6 +528,7 @@ void check_wifi_connection(void)
                 // Failed, schedule another attempt
                 wifi_disconnect_time = now;
                 reconnect_pending = true;
+                printf("Core 1: Reconnection failed, will retry...\n");
             }
         }
     }
@@ -890,34 +893,6 @@ void core1_entry(void)
     }
 }
 
-// [------------------------------------------------------------------------- SD Read/Write -------------------------------------------------------------------------]
-
-bool try_sd_mount(void)
-{
-    FRESULT fr = f_mount(&fs, "0:", 1);
-    if (fr == FR_OK) {
-        return true;
-    }
-    
-    sleep_ms(500);
-    fr = f_mount(&fs, "0:", 1);
-    return (fr == FR_OK);
-}
-
-bool init_sd_card(void)
-{
-    printf("Initializing SD card...\n");
-    sleep_ms(100);
-
-    if (try_sd_mount()) {
-        sd_mounted = true;
-        printf("SD card mounted successfully\n");
-        return true;
-    }
-
-    printf("SD card mount failed\n");
-    return false;
-}
 
 
 
