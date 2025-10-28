@@ -9,7 +9,6 @@
 #include "hid_config.h"
 
 #include "ff.h"
-#include "diskio.h"
 
 #include "pico/cyw43_arch.h"
 #include "pico/multicore.h"
@@ -26,12 +25,15 @@
 #include "https_config.h"
 
 #define HID_BUTTON_PIN 20
-#define WEBHOOK_BUTTON_PIN 21
 #define WIFI_LED_PIN 6
+#define DNS_LED_PIN 7
+#define MTLS_LED_PIN 8
+
 #define RX_BUFFER_SIZE 512
-#define DATA_TIMEOUT_MS 20000
 #define MAX_SEQ 512
 
+
+#define DATA_TIMEOUT_MS 20000
 #define WIFI_RECONNECT_DELAY_MS 5000
 
 // MTLS CONFIGURATION
@@ -74,7 +76,6 @@ bool init_wifi(void);
 bool try_wifi_connect(void);
 void check_wifi_connection(void);
 void send_webhook_post_with_cleanup(health_data_t* data);
-void check_webhook_button(void);
 void core1_entry(void);
 
 void dns_callback(const char* name, const ip_addr_t* ipaddr, void* arg);
@@ -82,7 +83,6 @@ err_t https_connected_callback(void* arg, struct altcp_pcb* tpcb, err_t err);
 err_t https_recv_callback(void* arg, struct altcp_pcb* tpcb, struct pbuf* p, err_t err);
 void https_err_callback(void* arg, err_t err);
 
-void log_disconnect_event(void);
 void hid_task(void);
 void process_json_data(char *json);
 
@@ -136,13 +136,18 @@ int main(void)
     gpio_set_dir(HID_BUTTON_PIN, GPIO_IN);
     gpio_pull_up(HID_BUTTON_PIN);
 
-    gpio_init(WEBHOOK_BUTTON_PIN);
-    gpio_set_dir(WEBHOOK_BUTTON_PIN, GPIO_IN);
-    gpio_pull_up(WEBHOOK_BUTTON_PIN);
-
+    // LED Pins
     gpio_init(WIFI_LED_PIN);
     gpio_set_dir(WIFI_LED_PIN, GPIO_OUT);
     gpio_put(WIFI_LED_PIN, 0);
+
+    gpio_init(DNS_LED_PIN);
+    gpio_set_dir(DNS_LED_PIN, GPIO_OUT);
+    gpio_put(DNS_LED_PIN, 0);
+
+    gpio_init(MTLS_LED_PIN);
+    gpio_set_dir(MTLS_LED_PIN, GPIO_OUT);
+    gpio_put(MTLS_LED_PIN, 0);
 
     // Launch WiFi on Core 1
     multicore_launch_core1(core1_entry);
@@ -153,27 +158,13 @@ int main(void)
     {
         tud_task();
         hid_task();
-        check_webhook_button();
 
         // Try to mount SD card after USB is connected (only once)
         if (usb_mounted && !sd_init_attempted) {
             sd_init_attempted = true;
             sleep_ms(100);
             if (init_sd_card()) {
-                printf("SD card ready for logging\n");
-            }
-        }
-
-        uint32_t now = to_ms_since_boot(get_absolute_time());
-        if (last_data_time > 0 && (now - last_data_time > DATA_TIMEOUT_MS))
-        {
-            if (current_health.valid || is_connected)
-            {
-                log_disconnect_event();
-                sample_count = 0;
-                current_health.valid = false;
-                is_connected = false;
-                printf("\n[DISCONNECTED] Counter reset\n");
+                printf("SD card ready\n");
             }
         }
 
@@ -815,26 +806,6 @@ void send_webhook_post_with_cleanup(health_data_t* data)
     webhook_in_progress = false;
 }
 
-void check_webhook_button(void)
-{
-    static bool last_button_state = true;
-    static uint32_t debounce_time = 0;
-
-    bool current_state = gpio_get(WEBHOOK_BUTTON_PIN);
-    uint32_t now = to_ms_since_boot(get_absolute_time());
-
-    if (!current_state && last_button_state)
-    {
-        if (now - debounce_time > 200)
-        {
-            printf("\n>>> GP21 Button Pressed! <<<\n");
-            webhook_trigger = true;
-            debounce_time = now;
-        }
-    }
-
-    last_button_state = current_state;
-}
 
 // [------------------------------------------------------------------------- Core 1 - WiFi Handler -------------------------------------------------------------------------]
 
@@ -946,42 +917,6 @@ bool init_sd_card(void)
 
     printf("SD card mount failed\n");
     return false;
-}
-
-void log_disconnect_event(void)
-{
-    if (!sd_mounted)
-        return;
-
-    FIL fil;
-    FRESULT fr;
-    UINT bytes_written;
-
-    fr = f_open(&fil, "0:/pico_logs.txt", FA_WRITE | FA_OPEN_APPEND);
-    if (fr != FR_OK)
-    {
-        VPRINTF("Failed to open log file: %d\n", fr);
-        return;
-    }
-
-    uint32_t timestamp = to_ms_since_boot(get_absolute_time());
-
-    char log_msg[128];
-    snprintf(log_msg, sizeof(log_msg),
-             "[%lu ms] DISCONNECT - Sample count was %lu\n",
-             timestamp, sample_count);
-
-    fr = f_write(&fil, log_msg, strlen(log_msg), &bytes_written);
-    if (fr != FR_OK)
-    {
-        VPRINTF("Failed to write to log: %d\n", fr);
-    }
-    else
-    {
-        VPRINTF("Logged disconnect event to SD card\n");
-    }
-
-    f_close(&fil);
 }
 
 
