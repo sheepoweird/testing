@@ -7,6 +7,7 @@
 
 /* Included device support */
 #define ATCA_ATECC608_SUPPORT
+#define ATCA_I2C_ECC_ADDRESS 0x60
 
 /* \brief How long to wait after an initial wake failure for the POST to
  *         complete.
