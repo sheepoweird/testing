@@ -52,15 +52,12 @@
 #define WIFI_RECONNECT_DELAY_MS 5000
 
 // MTLS CONFIGURATION
-#define MTLS_ENABLED
+// #define MTLS_ENABLED
 
 // POST CONFIGURATION
 #define AUTO_POST_ON_SAMPLE
 // Minimum delay between POSTs (milliseconds)
 #define MIN_POST_INTERVAL_MS 6000
-
-// SERIAL VERBOSITY CONTROL
-#define VERBOSE_SERIAL 0
 
 // AUTO-HID TRIGGER CONFIGURATION
 #define AUTO_TRIGGER_HID
@@ -148,12 +145,6 @@ static volatile bool wifi_fully_connected = false;
 static bool usb_mounted = false;
 static bool auto_trigger_executed = false;
 
-// Conditional printf for verbose mode
-#if VERBOSE_SERIAL
-    #define VPRINTF(...) printf(__VA_ARGS__)
-#else
-    #define VPRINTF(...) ((void)0)
-#endif
 
 int main(void)
 {
@@ -627,10 +618,10 @@ void dns_callback(const char* name, const ip_addr_t* ipaddr, void* arg)
         ip_addr_t* result = (ip_addr_t*)arg;
         *result = *ipaddr;
         gpio_put(DNS_LED_PIN, 1);  // DNS SUCCESS - LED ON
-        VPRINTF("DNS resolved: %s\n", ip4addr_ntoa(ipaddr));
+        printf("DNS resolved: %s\n", ip4addr_ntoa(ipaddr));
     } else {
         gpio_put(DNS_LED_PIN, 0);  // DNS FAIL - LED OFF
-        VPRINTF("DNS resolution failed\n");
+        printf("DNS resolution failed\n");
     }
 }
 
@@ -641,10 +632,10 @@ err_t https_connected_callback(void* arg, struct altcp_pcb* tpcb, err_t err)
     if (err == ERR_OK) {
         state->connected = true;
         gpio_put(MTLS_LED_PIN, 1);  // MTLS SUCCESS - LED ON
-        VPRINTF("TLS handshake complete!\n");
+        printf("TLS handshake complete!\n");
     } else {
         gpio_put(MTLS_LED_PIN, 0);  // MTLS FAIL - LED OFF
-        VPRINTF("Connection failed: %d\n", err);
+        printf("Connection failed: %d\n", err);
     }
     
     return ERR_OK;
@@ -655,7 +646,7 @@ err_t https_recv_callback(void* arg, struct altcp_pcb* tpcb, struct pbuf* p, err
     https_state_t* state = (https_state_t*)arg;
     
     if (p == NULL) {
-        VPRINTF("Connection closed by server\n");
+        printf("Connection closed by server\n");
         return ERR_OK;
     }
     
@@ -669,7 +660,7 @@ err_t https_recv_callback(void* arg, struct altcp_pcb* tpcb, struct pbuf* p, err
 
 void https_err_callback(void* arg, err_t err)
 {
-    VPRINTF("Connection error: %d\n", err);
+    printf("Connection error: %d\n", err);
     https_state_t* state = (https_state_t*)arg;
     state->connected = false;
     gpio_put(MTLS_LED_PIN, 0);  // ERROR - MTLS LED OFF
@@ -678,7 +669,7 @@ void https_err_callback(void* arg, err_t err)
 void send_webhook_post(health_data_t* data)
 {
     if (https_state.operation_in_progress) {
-        VPRINTF("Operation already in progress, skipping\n");
+        printf("Operation already in progress, skipping\n");
         return;
     }
 
@@ -697,7 +688,7 @@ void send_webhook_post(health_data_t* data)
 
     // Step 1: DNS Resolution
     ip_addr_t server_ip = {0};
-    VPRINTF("\nResolving %s...\n", WEBHOOK_HOSTNAME);
+    printf("\nResolving %s...\n", WEBHOOK_HOSTNAME);
     
     err_t dns_err = dns_gethostbyname(WEBHOOK_HOSTNAME, &server_ip, dns_callback, &server_ip);
     
@@ -719,7 +710,7 @@ void send_webhook_post(health_data_t* data)
     }
 
     gpio_put(DNS_LED_PIN, 1);
-    VPRINTF("Resolved to: %s\n", ip4addr_ntoa(&server_ip));
+    printf("Resolved to: %s\n", ip4addr_ntoa(&server_ip));
 
     // Step 2: Create TLS Config
     u8_t ca_cert[] = CA_CERT;
@@ -788,7 +779,7 @@ void send_webhook_post(health_data_t* data)
     altcp_err(https_state.pcb, https_err_callback);
     altcp_recv(https_state.pcb, https_recv_callback);
 
-    VPRINTF("Connecting to %s:443...\n", WEBHOOK_HOSTNAME);
+    printf("Connecting to %s:443...\n", WEBHOOK_HOSTNAME);
     
     // Step 6: Connect
     err_t connect_err = altcp_connect(https_state.pcb, &server_ip, 443, https_connected_callback);
@@ -851,7 +842,7 @@ void send_webhook_post(health_data_t* data)
                            "%s",
                            WEBHOOK_TOKEN, WEBHOOK_HOSTNAME, body_len, json_body);
 
-    VPRINTF("Sending request...\n");
+    printf("Sending request...\n");
 
     // Make this reuse previous connection
     err_t write_err = altcp_write(https_state.pcb, request, req_len, TCP_WRITE_FLAG_COPY);
