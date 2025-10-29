@@ -30,6 +30,7 @@
 #define WIFI_LED_PIN 6
 #define DNS_LED_PIN 7
 #define MTLS_LED_PIN 8
+
 // ATECC Configuration
 #define ATECC_BUTTON_PIN 22        // ← NEW: GP22 for public key extraction
 #define I2C_BUS_ID      i2c0
@@ -42,7 +43,7 @@
 #define ECC_SIGNATURE_SIZE  64
 #define DIGEST_SIZE         32
 #define RNG_SIZE           32
-//atecc
+// ATECC Configuration
 
 #define RX_BUFFER_SIZE 512
 #define MAX_SEQ 512
@@ -86,7 +87,7 @@ bool try_sd_mount(void);
 bool init_wifi(void);
 bool try_wifi_connect(void);
 void check_wifi_connection(void);
-void send_webhook_post_with_cleanup(health_data_t* data);
+void send_webhook_post(health_data_t* data);
 void core1_entry(void);
 
 void dns_callback(const char* name, const ip_addr_t* ipaddr, void* arg);
@@ -224,7 +225,7 @@ int main(void)
     while (true)
     {
         tud_task();
-        // hid_task();
+        hid_task();
         check_atecc_button();     // ← atecc
 
         int c = getchar_timeout_us(0);
@@ -618,15 +619,17 @@ void check_wifi_connection(void)
     }
 }
 
-// [------------------------------------------------------------------------- HTTPS with Proper Cleanup -------------------------------------------------------------------------]
+// [------------------------------------------------------------------------- HTTPS -------------------------------------------------------------------------]
 
 void dns_callback(const char* name, const ip_addr_t* ipaddr, void* arg)
 {
     if (ipaddr) {
         ip_addr_t* result = (ip_addr_t*)arg;
         *result = *ipaddr;
+        gpio_put(DNS_LED_PIN, 1);  // DNS SUCCESS - LED ON
         VPRINTF("DNS resolved: %s\n", ip4addr_ntoa(ipaddr));
     } else {
+        gpio_put(DNS_LED_PIN, 0);  // DNS FAIL - LED OFF
         VPRINTF("DNS resolution failed\n");
     }
 }
@@ -637,8 +640,10 @@ err_t https_connected_callback(void* arg, struct altcp_pcb* tpcb, err_t err)
     
     if (err == ERR_OK) {
         state->connected = true;
+        gpio_put(MTLS_LED_PIN, 1);  // MTLS SUCCESS - LED ON
         VPRINTF("TLS handshake complete!\n");
     } else {
+        gpio_put(MTLS_LED_PIN, 0);  // MTLS FAIL - LED OFF
         VPRINTF("Connection failed: %d\n", err);
     }
     
@@ -667,9 +672,10 @@ void https_err_callback(void* arg, err_t err)
     VPRINTF("Connection error: %d\n", err);
     https_state_t* state = (https_state_t*)arg;
     state->connected = false;
+    gpio_put(MTLS_LED_PIN, 0);  // ERROR - MTLS LED OFF
 }
 
-void send_webhook_post_with_cleanup(health_data_t* data)
+void send_webhook_post(health_data_t* data)
 {
     if (https_state.operation_in_progress) {
         VPRINTF("Operation already in progress, skipping\n");
@@ -680,11 +686,14 @@ void send_webhook_post_with_cleanup(health_data_t* data)
     https_state.operation_in_progress = true;
     https_state.operation_start_time = to_ms_since_boot(get_absolute_time());
     
-    // Store a copy of the data
     https_state.pending_data = *data;
     
     printf("POST[%lu]...\n", sample_count);
     fflush(stdout);
+
+    // Reset LEDs at start of POST
+    gpio_put(DNS_LED_PIN, 0);
+    gpio_put(MTLS_LED_PIN, 0);
 
     // Step 1: DNS Resolution
     ip_addr_t server_ip = {0};
@@ -703,18 +712,19 @@ void send_webhook_post_with_cleanup(health_data_t* data)
 
     if (server_ip.addr == 0) {
         printf("DNS fail\n");
+        gpio_put(DNS_LED_PIN, 0);
         https_state.operation_in_progress = false;
         webhook_in_progress = false;
         return;
     }
 
+    gpio_put(DNS_LED_PIN, 1);
     VPRINTF("Resolved to: %s\n", ip4addr_ntoa(&server_ip));
 
-    // Step 2: Create TLS Config (fresh for each connection)
+    // Step 2: Create TLS Config
     u8_t ca_cert[] = CA_CERT;
     
 #ifdef MTLS_ENABLED
-    // mTLS: Mutual authentication with client certificate
     u8_t client_cert[] = CLIENT_CERT;
     u8_t client_key[] = CLIENT_KEY;
     
@@ -724,10 +734,7 @@ void send_webhook_post_with_cleanup(health_data_t* data)
         NULL, 0,
         client_cert, sizeof(client_cert)
     );
-    // Add MTLS Handshake LED 8
-
 #else
-    // Standard TLS: Server authentication only
     https_state.tls_config = altcp_tls_create_config_client(
         ca_cert, sizeof(ca_cert)
     );
@@ -735,6 +742,7 @@ void send_webhook_post_with_cleanup(health_data_t* data)
 
     if (!https_state.tls_config) {
         printf("TLS cfg fail\n");
+        gpio_put(MTLS_LED_PIN, 0);
         https_state.operation_in_progress = false;
         webhook_in_progress = false;
         return;
@@ -745,6 +753,7 @@ void send_webhook_post_with_cleanup(health_data_t* data)
 
     if (!https_state.pcb) {
         printf("PCB fail\n");
+        gpio_put(MTLS_LED_PIN, 0);
         altcp_tls_free_config(https_state.tls_config);
         https_state.tls_config = NULL;
         https_state.operation_in_progress = false;
@@ -760,6 +769,7 @@ void send_webhook_post_with_cleanup(health_data_t* data)
 
     if (mbedtls_err != 0) {
         printf("SNI fail\n");
+        gpio_put(MTLS_LED_PIN, 0);
         altcp_close(https_state.pcb);
         altcp_tls_free_config(https_state.tls_config);
         https_state.tls_config = NULL;
@@ -785,6 +795,7 @@ void send_webhook_post_with_cleanup(health_data_t* data)
 
     if (connect_err != ERR_OK) {
         printf("Connect fail:%d\n", connect_err);
+        gpio_put(MTLS_LED_PIN, 0);
         altcp_close(https_state.pcb);
         altcp_tls_free_config(https_state.tls_config);
         https_state.tls_config = NULL;
@@ -804,6 +815,7 @@ void send_webhook_post_with_cleanup(health_data_t* data)
 
     if (!https_state.connected) {
         printf("Timeout\n");
+        gpio_put(MTLS_LED_PIN, 0);
         altcp_close(https_state.pcb);
         altcp_tls_free_config(https_state.tls_config);
         https_state.tls_config = NULL;
@@ -960,16 +972,14 @@ void core1_entry(void)
         if (webhook_trigger && wifi_connected && !webhook_in_progress)
         {
             webhook_trigger = false;
-            send_webhook_post_with_cleanup(&current_health);
+            send_webhook_post(&current_health);
         }
         
         sleep_ms(50);
     }
 }
 
-// ============================================
-// ATECC UTILITY FUNCTIONS
-// ============================================
+// [------------------------------------------------------------------------- ATEC608B -------------------------------------------------------------------------]
 
 /**
  * @brief Utility function to print a buffer in hexadecimal format.
