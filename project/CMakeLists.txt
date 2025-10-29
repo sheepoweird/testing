@@ -28,7 +28,7 @@ project(${PROGRAM_NAME})
 pico_sdk_init()
 
 add_subdirectory(../src build)
-add_subdirectory(include/cryptoauthlib)#atecc
+add_subdirectory(../include/cryptoauthlib/lib build_cryptoauth) # ← atecc
 
 add_executable(${PROGRAM_NAME}
   hw_config.c
@@ -55,8 +55,12 @@ target_link_libraries(${PROGRAM_NAME} PRIVATE
 target_include_directories(${PROGRAM_NAME} PRIVATE
   ${CMAKE_CURRENT_LIST_DIR}/include
   ${CMAKE_CURRENT_LIST_DIR} 
-  ${CMAKE_CURRENT_LIST_DIR}/include/cryptoauthlib/lib    # ← ADD
-
+  
+  ${CMAKE_CURRENT_LIST_DIR}/../include/cryptoauthlib/lib            # ← atecc
+  ${CMAKE_CURRENT_LIST_DIR}/../include/cryptoauthlib/lib/hal        # ← atecc
+  ${CMAKE_CURRENT_LIST_DIR}/../include/cryptoauthlib/lib/calib      # ← atecc
+  ${CMAKE_CURRENT_LIST_DIR}/../include/cryptoauthlib/lib/crypto     # ← atecc
+  ${CMAKE_CURRENT_LIST_DIR}/../include/cryptoauthlib/lib/atcacert   # ← atecc
 )
 
 # https://datasheets.raspberrypi.com/pico/raspberry-pi-pico-c-sdk.pdf
