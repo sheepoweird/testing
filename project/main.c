@@ -22,10 +22,27 @@
 #include "mbedtls/ssl.h"
 #include "https_config.h"
 
+#include "hardware/i2c.h"       // ← ADD 
+#include "cryptoauthlib.h"      // ← ADD
+#include "atca_basic.h"     // ← ADD
+
 #define HID_BUTTON_PIN 20
 #define WIFI_LED_PIN 6
 #define DNS_LED_PIN 7
 #define MTLS_LED_PIN 8
+// ATECC Configuration
+#define ATECC_BUTTON_PIN 22        // ← NEW: GP22 for public key extraction
+#define I2C_BUS_ID      i2c0
+#define I2C_SDA_PIN     4
+#define I2C_SCL_PIN     5
+#define I2C_BAUDRATE    100000
+
+#define TARGET_SLOT 0
+#define ECC_PUB_KEY_SIZE    64
+#define ECC_SIGNATURE_SIZE  64
+#define DIGEST_SIZE         32
+#define RNG_SIZE           32
+//atecc
 
 #define RX_BUFFER_SIZE 512
 #define MAX_SEQ 512
@@ -34,7 +51,7 @@
 #define WIFI_RECONNECT_DELAY_MS 5000
 
 // MTLS CONFIGURATION
-// #define MTLS_ENABLED
+#define MTLS_ENABLED
 
 // POST CONFIGURATION
 #define AUTO_POST_ON_SAMPLE
@@ -85,6 +102,26 @@ health_data_t current_health = {0};
 uint32_t last_data_time = 0;
 uint32_t sample_count = 0;
 bool is_connected = false;
+// ATECC Global Variables
+uint8_t g_public_key[ECC_PUB_KEY_SIZE] = {0};
+uint8_t g_signature[ECC_SIGNATURE_SIZE] = {0};
+const char* DEVICE_CN = "PICO_W_CLIENT";
+
+// ATECC Configuration
+ATCAIfaceCfg cfg_atecc608_pico = {
+    .iface_type = ATCA_I2C_IFACE,
+    .devtype    = ATECC608B,
+    .atcai2c = {
+        .address = 0xC0 >> 1,   // 7-bit address 0x60
+        .bus     = 0,
+        .baud    = I2C_BAUDRATE
+    },
+    .wake_delay = 1500,
+    .rx_retries = 20,
+    .cfg_data   = NULL
+};
+
+
 
 // HTTPS connection state
 typedef struct {
@@ -143,6 +180,42 @@ int main(void)
     gpio_set_dir(MTLS_LED_PIN, GPIO_OUT);
     gpio_put(MTLS_LED_PIN, 0);
 
+    // ============================================
+    // ATECC608B INITIALIZATION
+    // ============================================
+    printf("\n=== Initializing ATECC608B ===\n");
+    
+    // Initialize I2C Hardware
+    i2c_init(I2C_BUS_ID, I2C_BAUDRATE);
+    gpio_set_function(I2C_SDA_PIN, GPIO_FUNC_I2C);
+    gpio_set_function(I2C_SCL_PIN, GPIO_FUNC_I2C);
+    gpio_pull_up(I2C_SDA_PIN);
+    gpio_pull_up(I2C_SCL_PIN);
+    printf("✅ I2C Initialized at %dkHz\n", I2C_BAUDRATE / 1000);
+
+    // Initialize CryptoAuthLib
+    ATCA_STATUS status = atcab_init(&cfg_atecc608_pico);
+    if (status != ATCA_SUCCESS) {
+        printf("❌ CryptoAuthLib init failed: %d\n", status);
+        printf("⚠️  Continuing without ATECC...\n");
+    } else {
+        printf("✅ ATECC608B initialized successfully\n");
+        
+        // Verify device is alive
+        if (atecc_is_alive() == ATCA_SUCCESS) {
+            printf("✅ ATECC608B communication verified\n");
+        }
+    }
+    
+    // Initialize ATECC button (GP22)
+    gpio_init(ATECC_BUTTON_PIN);
+    gpio_set_dir(ATECC_BUTTON_PIN, GPIO_IN);
+    gpio_pull_up(ATECC_BUTTON_PIN);
+    
+    printf("=== ATECC Ready: Press GP22 to extract public key ===\n\n");
+    // ============================================
+
+
     // Launch WiFi on Core 1
     multicore_launch_core1(core1_entry);
     sleep_ms(2000);
@@ -151,7 +224,8 @@ int main(void)
     while (true)
     {
         tud_task();
-        hid_task();
+        // hid_task();
+        check_atecc_button();     // ← atecc
 
         int c = getchar_timeout_us(0);
 
@@ -893,8 +967,115 @@ void core1_entry(void)
     }
 }
 
+// ============================================
+// ATECC UTILITY FUNCTIONS
+// ============================================
 
+/**
+ * @brief Utility function to print a buffer in hexadecimal format.
+ */
+void print_hex(const uint8_t *data, size_t len) {
+    for (size_t i = 0; i < len; i++) {
+        printf("%02X", data[i]);
+    }
+}
 
+/**
+ * @brief Performs a simple device info query to check if the ATECC608B is present and responding.
+ * @return ATCA_SUCCESS if the chip is alive, otherwise an error status.
+ */
+ATCA_STATUS atecc_is_alive() {
+    uint8_t rev_id[4];
+    return atcab_info(rev_id);
+}
+
+/**
+ * @brief Extract and print public key from Slot 0
+ * This is executed when GP22 is pressed.
+ */
+void atecc_extract_pubkey() {
+    ATCA_STATUS status;
+
+    printf("\n======================================================\n");
+    printf("=== ATECC PUBLIC KEY EXTRACTION (GP22) ===\n");
+    printf("======================================================\n");
+
+    // Check device communication
+    if (atecc_is_alive() != ATCA_SUCCESS) {
+        printf("❌ HARDWARE ERROR: ATECC608B is unresponsive.\n");
+        return;
+    }
+
+    // Extract public key from Slot 0
+    printf("Extracting Public Key from Slot %d...\n", TARGET_SLOT);
+    status = atcab_get_pubkey(TARGET_SLOT, g_public_key);
+
+    if (status != ATCA_SUCCESS) {
+        printf("❌ FAILED: Could not read public key. Status: %d\n", status);
+        return;
+    }
+
+    printf("✅ SUCCESS: Public Key extracted:\n");
+    printf("\"PUBLIC_KEY\": \"");
+    print_hex(g_public_key, ECC_PUB_KEY_SIZE);
+    printf("\"\n");
+    printf("======================================================\n");
+}
+
+/**
+ * @brief Uses the ATECC608B's hardware RNG to generate and print 32 bytes of random data.
+ * Optional function - can be triggered manually if needed.
+ */
+void hardware_rng_test() {
+    ATCA_STATUS status;
+    uint8_t random_data[RNG_SIZE];
+
+    printf("\n======================================================\n");
+    printf("=== HARDWARE RNG TEST ===\n");
+    printf("======================================================\n");
+
+    if (atecc_is_alive() != ATCA_SUCCESS) {
+        printf("❌ HARDWARE ERROR: ATECC608B is unresponsive.\n");
+        return;
+    }
+
+    memset(random_data, 0, RNG_SIZE);
+    status = atcab_random(random_data);
+
+    if (status != ATCA_SUCCESS) {
+        printf("❌ FAILED: atcab_random failed! Status: 0x%02X\n", status);
+    } else {
+        printf("✅ SUCCESS: 32-byte Hardware Random Number:\n");
+        printf("\"RANDOM_DATA\": \"");
+        print_hex(random_data, RNG_SIZE);
+        printf("\"\n");
+    }
+
+    printf("======================================================\n");
+}
+/**
+ * @brief Check if ATECC button (GP22) is pressed
+ */
+void check_atecc_button(void)
+{
+    static bool last_button_state = true;
+    static uint32_t debounce_time = 0;
+
+    bool current_state = gpio_get(ATECC_BUTTON_PIN);
+    uint32_t now = to_ms_since_boot(get_absolute_time());
+
+    if (!current_state && last_button_state)
+    {
+        if (now - debounce_time > 200)
+        {
+            printf("\n>>> GP22 Button Pressed! <<<\n");
+            atecc_extract_pubkey();
+            debounce_time = now;
+        }
+    }
+
+    last_button_state = current_state;
+}
 
 
 // TODO DO NOT REMOVE COMMENTS

@@ -28,12 +28,14 @@ project(${PROGRAM_NAME})
 pico_sdk_init()
 
 add_subdirectory(../src build)
+add_subdirectory(include/cryptoauthlib)#atecc
 
 add_executable(${PROGRAM_NAME}
   hw_config.c
   main.c
   msc_disk.c
   usb_descriptors.c
+  hal_pico_i2c.c #atecc
 )
 target_link_libraries(${PROGRAM_NAME} PRIVATE
     no-OS-FatFS-SD-SDIO-SPI-RPi-Pico
@@ -46,11 +48,15 @@ target_link_libraries(${PROGRAM_NAME} PRIVATE
     pico_multicore
     pico_lwip_mbedtls
     pico_mbedtls
+    hardware_i2c            # ← atecc
+    cryptoauth              # ← atecc
 )
 
 target_include_directories(${PROGRAM_NAME} PRIVATE
   ${CMAKE_CURRENT_LIST_DIR}/include
   ${CMAKE_CURRENT_LIST_DIR} 
+  ${CMAKE_CURRENT_LIST_DIR}/include/cryptoauthlib/lib    # ← ADD
+
 )
 
 # https://datasheets.raspberrypi.com/pico/raspberry-pi-pico-c-sdk.pdf
@@ -61,6 +67,10 @@ target_compile_definitions(${PROGRAM_NAME} PUBLIC
 
     USE_PRINTF
     USE_DBG_PRINTF
+    #ateccdef
+    ATCA_HAL_I2C=1              
+    ATCA_ATECC608_SUPPORT=1     
+    ATCA_PRINTF=1
 )
 
 #target_compile_options(${PROGRAM_NAME} PRIVATE -Werror -Wall -Wextra -Wnull-dereference)
