@@ -22,9 +22,9 @@
 #include "mbedtls/ssl.h"
 #include "https_config.h"
 
-#include "hardware/i2c.h"       // ← ADD 
-#include "cryptoauthlib.h"      // ← ADD
-#include "atca_basic.h"     // ← ADD
+#include "hardware/i2c.h"
+#include "cryptoauthlib.h"
+#include "atca_basic.h"
 
 #define HID_BUTTON_PIN 20
 #define WIFI_LED_PIN 6
@@ -32,7 +32,7 @@
 #define MTLS_LED_PIN 8
 
 // ATECC Configuration
-#define ATECC_BUTTON_PIN 22        // ← NEW: GP22 for public key extraction
+#define ATECC_BUTTON_PIN 22
 #define I2C_BUS_ID      i2c0
 #define I2C_SDA_PIN     4
 #define I2C_SCL_PIN     5
@@ -43,7 +43,6 @@
 #define ECC_SIGNATURE_SIZE  64
 #define DIGEST_SIZE         32
 #define RNG_SIZE           32
-// ATECC Configuration
 
 #define RX_BUFFER_SIZE 512
 #define MAX_SEQ 512
@@ -56,17 +55,11 @@
 
 // POST CONFIGURATION
 #define AUTO_POST_ON_SAMPLE
-// Minimum delay between POSTs (milliseconds)
 #define MIN_POST_INTERVAL_MS 6000
 
 // AUTO-HID TRIGGER CONFIGURATION
 #define AUTO_TRIGGER_HID
 
-
-char rx_buffer[RX_BUFFER_SIZE];
-int rx_index = 0;
-
-// Type definition
 typedef struct
 {
     float cpu;
@@ -78,50 +71,6 @@ typedef struct
     bool valid;
 } health_data_t;
 
-// Forward Declarations
-bool init_sd_card(void);
-bool try_sd_mount(void);
-bool init_wifi(void);
-bool try_wifi_connect(void);
-void check_wifi_connection(void);
-void send_webhook_post(health_data_t* data);
-void core1_entry(void);
-
-void dns_callback(const char* name, const ip_addr_t* ipaddr, void* arg);
-err_t https_connected_callback(void* arg, struct altcp_pcb* tpcb, err_t err);
-err_t https_recv_callback(void* arg, struct altcp_pcb* tpcb, struct pbuf* p, err_t err);
-void https_err_callback(void* arg, err_t err);
-
-void hid_task(void);
-void process_json_data(char *json);
-
-// Global variables
-health_data_t current_health = {0};
-uint32_t last_data_time = 0;
-uint32_t sample_count = 0;
-bool is_connected = false;
-// ATECC Global Variables
-uint8_t g_public_key[ECC_PUB_KEY_SIZE] = {0};
-uint8_t g_signature[ECC_SIGNATURE_SIZE] = {0};
-const char* DEVICE_CN = "PICO_W_CLIENT";
-
-// ATECC Configuration
-ATCAIfaceCfg cfg_atecc608_pico = {
-    .iface_type = ATCA_I2C_IFACE,
-    .devtype    = ATECC608B,
-    .atcai2c = {
-        .address = 0xC0 >> 1,   // 7-bit address 0x60
-        .bus     = 0,
-        .baud    = I2C_BAUDRATE
-    },
-    .wake_delay = 1500,
-    .rx_retries = 20,
-    .cfg_data   = NULL
-};
-
-
-
-// HTTPS connection state
 typedef struct {
     struct altcp_tls_config* tls_config;
     struct altcp_pcb* pcb;
@@ -133,6 +82,43 @@ typedef struct {
     health_data_t pending_data;
 } https_state_t;
 
+typedef struct
+{
+    uint8_t modifier;
+    uint8_t key;
+} key_action_t;
+
+// GLOBAL VARIABLES
+
+// Serial buffer
+char rx_buffer[RX_BUFFER_SIZE];
+int rx_index = 0;
+
+// Health data
+health_data_t current_health = {0};
+uint32_t last_data_time = 0;
+uint32_t sample_count = 0;
+bool is_connected = false;
+
+// ATECC
+uint8_t g_public_key[ECC_PUB_KEY_SIZE] = {0};
+uint8_t g_signature[ECC_SIGNATURE_SIZE] = {0};
+const char* DEVICE_CN = "PICO_W_CLIENT";
+
+ATCAIfaceCfg cfg_atecc608_pico = {
+    .iface_type = ATCA_I2C_IFACE,
+    .devtype    = ATECC608B,
+    .atcai2c = {
+        .address = 0xC0 >> 1,
+        .bus     = 0,
+        .baud    = I2C_BAUDRATE
+    },
+    .wake_delay = 1500,
+    .rx_retries = 20,
+    .cfg_data   = NULL
+};
+
+// HTTPS state
 static https_state_t https_state = {0};
 
 // Inter-core communication
@@ -145,112 +131,147 @@ static volatile bool wifi_fully_connected = false;
 static bool usb_mounted = false;
 static bool auto_trigger_executed = false;
 
+// WiFi state
+static bool wifi_connected = false;
+static bool reconnect_pending = false;
+static uint32_t last_wifi_check = 0;
+static uint32_t wifi_disconnect_time = 0;
+static bool cyw43_initialized = false;
 
-int main(void)
-{
-    board_init();
-    tusb_init();
-    stdio_init_all();
-    tud_init(BOARD_TUD_RHPORT);
-    sleep_ms(10000);
+// HID sequence
+static key_action_t sequence[MAX_SEQ];
+static int seq_len = 0;
 
-    // Initialize GPIOs
-    gpio_init(HID_BUTTON_PIN);
-    gpio_set_dir(HID_BUTTON_PIN, GPIO_IN);
-    gpio_pull_up(HID_BUTTON_PIN);
+// [------------------------------------------------------------------------- ATECC608B -------------------------------------------------------------------------]
 
-    // LED Pins
-    gpio_init(WIFI_LED_PIN);
-    gpio_set_dir(WIFI_LED_PIN, GPIO_OUT);
-    gpio_put(WIFI_LED_PIN, 0);
+void print_hex(const uint8_t *data, size_t len) {
+    for (size_t i = 0; i < len; i++) {
+        printf("%02X", data[i]);
+    }
+}
 
-    gpio_init(DNS_LED_PIN);
-    gpio_set_dir(DNS_LED_PIN, GPIO_OUT);
-    gpio_put(DNS_LED_PIN, 0);
+ATCA_STATUS atecc_is_alive() {
+    uint8_t rev_id[4];
+    return atcab_info(rev_id);
+}
 
-    gpio_init(MTLS_LED_PIN);
-    gpio_set_dir(MTLS_LED_PIN, GPIO_OUT);
-    gpio_put(MTLS_LED_PIN, 0);
+void atecc_extract_pubkey() {
+    ATCA_STATUS status;
 
-    // ============================================
-    // ATECC608B INITIALIZATION
-    // ============================================
-    printf("\n=== Initializing ATECC608B ===\n");
-    
-    // Initialize I2C Hardware
-    i2c_init(I2C_BUS_ID, I2C_BAUDRATE);
-    gpio_set_function(I2C_SDA_PIN, GPIO_FUNC_I2C);
-    gpio_set_function(I2C_SCL_PIN, GPIO_FUNC_I2C);
-    gpio_pull_up(I2C_SDA_PIN);
-    gpio_pull_up(I2C_SCL_PIN);
-    printf("✅ I2C Initialized at %dkHz\n", I2C_BAUDRATE / 1000);
+    printf("\n======================================================\n");
+    printf("=== ATECC PUBLIC KEY EXTRACTION (GP22) ===\n");
+    printf("======================================================\n");
 
-    // Initialize CryptoAuthLib
-    ATCA_STATUS status = atcab_init(&cfg_atecc608_pico);
+    if (atecc_is_alive() != ATCA_SUCCESS) {
+        printf("❌ HARDWARE ERROR: ATECC608B is unresponsive.\n");
+        return;
+    }
+
+    printf("Extracting Public Key from Slot %d...\n", TARGET_SLOT);
+    status = atcab_get_pubkey(TARGET_SLOT, g_public_key);
+
     if (status != ATCA_SUCCESS) {
-        printf("❌ CryptoAuthLib init failed: %d\n", status);
-        printf("⚠️  Continuing without ATECC...\n");
+        printf("❌ FAILED: Could not read public key. Status: %d\n", status);
+        return;
+    }
+
+    printf("✅ SUCCESS: Public Key extracted:\n");
+    printf("\"PUBLIC_KEY\": \"");
+    print_hex(g_public_key, ECC_PUB_KEY_SIZE);
+    printf("\"\n");
+    printf("======================================================\n");
+}
+
+void hardware_rng_test() {
+    ATCA_STATUS status;
+    uint8_t random_data[RNG_SIZE];
+
+    printf("\n======================================================\n");
+    printf("=== HARDWARE RNG TEST ===\n");
+    printf("======================================================\n");
+
+    if (atecc_is_alive() != ATCA_SUCCESS) {
+        printf("❌ HARDWARE ERROR: ATECC608B is unresponsive.\n");
+        return;
+    }
+
+    memset(random_data, 0, RNG_SIZE);
+    status = atcab_random(random_data);
+
+    if (status != ATCA_SUCCESS) {
+        printf("❌ FAILED: atcab_random failed! Status: 0x%02X\n", status);
     } else {
-        printf("✅ ATECC608B initialized successfully\n");
-        
-        // Verify device is alive
-        if (atecc_is_alive() == ATCA_SUCCESS) {
-            printf("✅ ATECC608B communication verified\n");
-        }
+        printf("✅ SUCCESS: 32-byte Hardware Random Number:\n");
+        printf("\"RANDOM_DATA\": \"");
+        print_hex(random_data, RNG_SIZE);
+        printf("\"\n");
     }
-    
-    // Initialize ATECC button (GP22)
-    gpio_init(ATECC_BUTTON_PIN);
-    gpio_set_dir(ATECC_BUTTON_PIN, GPIO_IN);
-    gpio_pull_up(ATECC_BUTTON_PIN);
-    
-    printf("=== ATECC Ready: Press GP22 to extract public key ===\n\n");
-    // ============================================
 
+    printf("======================================================\n");
+}
 
-    // Launch WiFi on Core 1
-    multicore_launch_core1(core1_entry);
-    sleep_ms(2000);
+void check_atecc_button(void)
+{
+    static bool last_button_state = true;
+    static uint32_t debounce_time = 0;
 
-    // Core 0 main loop
-    while (true)
+    bool current_state = gpio_get(ATECC_BUTTON_PIN);
+    uint32_t now = to_ms_since_boot(get_absolute_time());
+
+    if (!current_state && last_button_state)
     {
-        tud_task();
-        hid_task();
-        check_atecc_button();     // ← atecc
-
-        int c = getchar_timeout_us(0);
-
-        if (c != PICO_ERROR_TIMEOUT)
+        if (now - debounce_time > 200)
         {
-            if (c == '\r' || c == '\n')
-            {
-                if (rx_index < RX_BUFFER_SIZE)
-                {
-                    rx_buffer[rx_index] = '\0';
-                }
-                else
-                {
-                    rx_buffer[RX_BUFFER_SIZE - 1] = '\0';
-                }
-
-                if (rx_index > 0 && rx_buffer[0] == '{')
-                {
-                    process_json_data(rx_buffer);
-                }
-
-                rx_index = 0;
-            }
-            else if (rx_index < RX_BUFFER_SIZE - 1)
-            {
-                rx_buffer[rx_index++] = c;
-            }
+            printf("\n>>> GP22 Button Pressed! <<<\n");
+            atecc_extract_pubkey();
+            debounce_time = now;
         }
-
-        tight_loop_contents();
     }
 
-    return 0;
+    last_button_state = current_state;
+}
+
+// [------------------------------------------------------------------------- JSON PROCESSING -------------------------------------------------------------------------]
+
+void process_json_data(char *json)
+{
+    char *cpu_pos = strstr(json, "\"cpu\":");
+    char *mem_pos = strstr(json, "\"memory\":");
+    char *disk_pos = strstr(json, "\"disk\":");
+    char *net_in_pos = strstr(json, "\"net_in\":");
+    char *net_out_pos = strstr(json, "\"net_out\":");
+    char *proc_pos = strstr(json, "\"processes\":");
+
+    if (!is_connected) {
+        is_connected = true;
+        printf("[CONNECTED] Starting sample counter\n");
+    }
+
+    if (cpu_pos) current_health.cpu = atof(cpu_pos + 6);
+    if (mem_pos) current_health.memory = atof(mem_pos + 10);
+    if (disk_pos) current_health.disk = atof(disk_pos + 7);
+    if (net_in_pos) current_health.net_in = atof(net_in_pos + 10);
+    if (net_out_pos) current_health.net_out = atof(net_out_pos + 11);
+    if (proc_pos) current_health.processes = atoi(proc_pos + 13);
+
+    current_health.valid = true;
+    last_data_time = to_ms_since_boot(get_absolute_time());
+    sample_count++;
+
+    printf("\r[%3lu] CPU:%5.1f%% MEM:%5.1f%% DSK:%5.1f%%\n",
+           sample_count,
+           current_health.cpu,
+           current_health.memory,
+           current_health.disk);
+    fflush(stdout);
+
+#ifdef AUTO_POST_ON_SAMPLE
+    uint32_t now = to_ms_since_boot(get_absolute_time());
+    if (!webhook_in_progress && (now - last_post_time >= MIN_POST_INTERVAL_MS)) {
+        webhook_trigger = true;
+        last_post_time = now;
+    }
+#endif
 }
 
 // [------------------------------------------------------------------------- MSC -------------------------------------------------------------------------]
@@ -268,19 +289,14 @@ void tud_umount_cb(void)
     usb_mounted = false;
 }
 
-void tud_suspend_cb(bool remote_wakeup_en) { (void)remote_wakeup_en; }
+void tud_suspend_cb(bool remote_wakeup_en) { 
+    (void)remote_wakeup_en; 
+}
+
 void tud_resume_cb(void) {}
 
 // [------------------------------------------------------------------------- HID -------------------------------------------------------------------------]
 
-typedef struct
-{
-    uint8_t modifier;
-    uint8_t key;
-} key_action_t;
-
-static key_action_t sequence[MAX_SEQ];
-static int seq_len = 0;
 
 static inline void add_key(uint8_t mod, uint8_t key, int delay_count)
 {
@@ -416,211 +432,28 @@ void hid_task(void)
 
 uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t report_type, uint8_t* buffer, uint16_t reqlen)
 {
-    (void) itf; (void) report_id; (void) report_type; (void) buffer; (void) reqlen;
+    (void)itf; (void)report_id; (void)report_type; (void)buffer; (void)reqlen;
     return 0;
 }
 
 void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t report_type, uint8_t const* buffer, uint16_t bufsize)
 {
-    (void) itf; (void) report_id; (void) report_type; (void) buffer; (void) bufsize;
+    (void)itf; (void)report_id; (void)report_type; (void)buffer; (void)bufsize;
 }
 
-
-// [------------------------------------------------------------------------- JSON Processing -------------------------------------------------------------------------]
-
-void process_json_data(char *json)
-{
-    // Simple JSON parsing
-    char *cpu_pos = strstr(json, "\"cpu\":");
-    char *mem_pos = strstr(json, "\"memory\":");
-    char *disk_pos = strstr(json, "\"disk\":");
-    char *net_in_pos = strstr(json, "\"net_in\":");
-    char *net_out_pos = strstr(json, "\"net_out\":");
-    char *proc_pos = strstr(json, "\"processes\":");
-
-    if (!is_connected) {
-        is_connected = true;
-        printf("[CONNECTED] Starting sample counter\n");
-    }
-
-    if (cpu_pos) current_health.cpu = atof(cpu_pos + 6);
-    if (mem_pos) current_health.memory = atof(mem_pos + 10);
-    if (disk_pos) current_health.disk = atof(disk_pos + 7);
-    if (net_in_pos) current_health.net_in = atof(net_in_pos + 10);
-    if (net_out_pos) current_health.net_out = atof(net_out_pos + 11);
-    if (proc_pos) current_health.processes = atoi(proc_pos + 13);
-
-    current_health.valid = true;
-    last_data_time = to_ms_since_boot(get_absolute_time());
-    sample_count++;
-
-    // Minimal serial response
-    printf("\r[%3lu] CPU:%5.1f%% MEM:%5.1f%% DSK:%5.1f%%\n",
-           sample_count,
-           current_health.cpu,
-           current_health.memory,
-           current_health.disk);
-    fflush(stdout);
-
-#ifdef AUTO_POST_ON_SAMPLE
-    // Trigger POST for this sample if enough time has passed
-    uint32_t now = to_ms_since_boot(get_absolute_time());
-    if (!webhook_in_progress && (now - last_post_time >= MIN_POST_INTERVAL_MS)) {
-        webhook_trigger = true;
-        last_post_time = now;
-    }
-#endif
-}
-
-// [------------------------------------------------------------------------- WiFi -------------------------------------------------------------------------]
-
-static bool wifi_connected = false;
-static bool reconnect_pending = false;
-static uint32_t last_wifi_check = 0;
-static uint32_t wifi_disconnect_time = 0;
-static bool cyw43_initialized = false;
-
-bool init_wifi(void)
-{
-    printf("Core 1: Initializing WiFi...\n");
-
-    // Deinit first if already initialized to prevent bus errors
-    if (cyw43_initialized)
-    {
-        printf("Core 1: Deinitializing previous WiFi instance...\n");
-        cyw43_arch_deinit();
-        cyw43_initialized = false;
-        sleep_ms(1000);  // Give hardware time to reset
-    }
-
-    if (cyw43_arch_init())
-    {
-        printf("Core 1: WiFi init FAILED\n");
-        return false;
-    }
-
-    cyw43_initialized = true;
-    cyw43_arch_enable_sta_mode();
-    printf("Core 1: WiFi STA mode enabled\n");
-
-    if (!try_wifi_connect())
-    {
-        printf("Core 1: Initial WiFi connection FAILED\n");
-        cyw43_arch_deinit();
-        cyw43_initialized = false;
-        return false;
-    }
-
-    printf("*** WIFI FULLY CONNECTED ***\n");
-    wifi_fully_connected = true;
-
-    return true;
-}
-
-bool try_wifi_connect(void)
-{
-    printf("Core 1: Connecting to '%s'...\n", WIFI_SSID);
-
-    int link_status = cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA);
-    printf("connect status: ");
-    if (link_status == CYW43_LINK_DOWN) printf("no ip\n");
-    else if (link_status == CYW43_LINK_JOIN) printf("wifi joined\n");
-    else if (link_status == CYW43_LINK_NOIP) printf("no ip\n");
-    else if (link_status == CYW43_LINK_UP) printf("link up\n");
-    else if (link_status == CYW43_LINK_FAIL) printf("failed\n");
-    else if (link_status == CYW43_LINK_NONET) printf("no net\n");
-    else if (link_status == CYW43_LINK_BADAUTH) printf("bad auth\n");
-    else printf("unknown\n");
-
-    int connect_result = cyw43_arch_wifi_connect_timeout_ms(
-        WIFI_SSID, WIFI_PASSWORD,
-        CYW43_AUTH_WPA2_AES_PSK, 30000);
-
-    if (connect_result != 0)
-    {
-        printf("WiFi: Connection FAILED (error %d)\n", connect_result);
-        wifi_connected = false;
-        return false;
-    }
-
-    printf("WiFi: Connected successfully!\n");
-
-    uint32_t ip = cyw43_state.netif[0].ip_addr.addr;
-    printf("WiFi: IP Address: %lu.%lu.%lu.%lu\n",
-           ip & 0xFF, (ip >> 8) & 0xFF, (ip >> 16) & 0xFF, (ip >> 24) & 0xFF);
-
-    wifi_connected = true;
-    return true;
-}
-
-void check_wifi_connection(void)
-{
-    uint32_t now = to_ms_since_boot(get_absolute_time());
-
-    // Only check if CYW43 is initialized to prevent crashes
-    if (!cyw43_initialized)
-        return;
-
-    // Check connection status every 5 seconds
-    if (now - last_wifi_check < 5000)
-        return;
-
-    last_wifi_check = now;
-
-    int link_status = cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA);
-
-    if (link_status != CYW43_LINK_UP)
-    {
-        if (wifi_connected)
-        {
-            printf("\nCore 1: WiFi connection lost!\n");
-            wifi_connected = false;
-            wifi_fully_connected = false;
-            wifi_disconnect_time = now;
-            reconnect_pending = true;
-        }
-        else if (reconnect_pending && (now - wifi_disconnect_time >= WIFI_RECONNECT_DELAY_MS))
-        {
-            // Time to attempt reconnect
-            printf("Core 1: Attempting reconnection...\n");
-            reconnect_pending = false;
-            
-            if (try_wifi_connect())
-            {
-                printf("Core 1: WiFi reconnected successfully!\n");
-            }
-            else
-            {
-                // Failed, schedule another attempt
-                wifi_disconnect_time = now;
-                reconnect_pending = true;
-                printf("Core 1: Reconnection failed, will retry...\n");
-            }
-        }
-    }
-    else
-    {
-        if (!wifi_connected)
-        {
-            wifi_connected = true;
-            wifi_fully_connected = true;
-            reconnect_pending = false;
-            printf("Core 1: WiFi link restored!\n");
-        }
-    }
-}
-
-// [------------------------------------------------------------------------- HTTPS -------------------------------------------------------------------------]
+// =============================================================================
+// HTTPS CALLBACK FUNCTIONS
+// =============================================================================
 
 void dns_callback(const char* name, const ip_addr_t* ipaddr, void* arg)
 {
     if (ipaddr) {
         ip_addr_t* result = (ip_addr_t*)arg;
         *result = *ipaddr;
-        gpio_put(DNS_LED_PIN, 1);  // DNS SUCCESS - LED ON
+        gpio_put(DNS_LED_PIN, 1);
         printf("DNS resolved: %s\n", ip4addr_ntoa(ipaddr));
     } else {
-        gpio_put(DNS_LED_PIN, 0);  // DNS FAIL - LED OFF
+        gpio_put(DNS_LED_PIN, 0);
         printf("DNS resolution failed\n");
     }
 }
@@ -631,10 +464,10 @@ err_t https_connected_callback(void* arg, struct altcp_pcb* tpcb, err_t err)
     
     if (err == ERR_OK) {
         state->connected = true;
-        gpio_put(MTLS_LED_PIN, 1);  // MTLS SUCCESS - LED ON
+        gpio_put(MTLS_LED_PIN, 1);
         printf("TLS handshake complete!\n");
     } else {
-        gpio_put(MTLS_LED_PIN, 0);  // MTLS FAIL - LED OFF
+        gpio_put(MTLS_LED_PIN, 0);
         printf("Connection failed: %d\n", err);
     }
     
@@ -663,8 +496,10 @@ void https_err_callback(void* arg, err_t err)
     printf("Connection error: %d\n", err);
     https_state_t* state = (https_state_t*)arg;
     state->connected = false;
-    gpio_put(MTLS_LED_PIN, 0);  // ERROR - MTLS LED OFF
+    gpio_put(MTLS_LED_PIN, 0);
 }
+
+// [------------------------------------------------------------------------- HTTPS -------------------------------------------------------------------------]
 
 void send_webhook_post(health_data_t* data)
 {
@@ -886,8 +721,132 @@ void send_webhook_post(health_data_t* data)
     webhook_in_progress = false;
 }
 
-
 // [------------------------------------------------------------------------- Core 1 - WiFi Handler -------------------------------------------------------------------------]
+
+bool try_wifi_connect(void)
+{
+    printf("Core 1: Connecting to '%s'...\n", WIFI_SSID);
+
+    int link_status = cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA);
+    printf("connect status: ");
+    if (link_status == CYW43_LINK_DOWN) printf("no ip\n");
+    else if (link_status == CYW43_LINK_JOIN) printf("wifi joined\n");
+    else if (link_status == CYW43_LINK_NOIP) printf("no ip\n");
+    else if (link_status == CYW43_LINK_UP) printf("link up\n");
+    else if (link_status == CYW43_LINK_FAIL) printf("failed\n");
+    else if (link_status == CYW43_LINK_NONET) printf("no net\n");
+    else if (link_status == CYW43_LINK_BADAUTH) printf("bad auth\n");
+    else printf("unknown\n");
+
+    int connect_result = cyw43_arch_wifi_connect_timeout_ms(
+        WIFI_SSID, WIFI_PASSWORD,
+        CYW43_AUTH_WPA2_AES_PSK, 30000);
+
+    if (connect_result != 0)
+    {
+        printf("WiFi: Connection FAILED (error %d)\n", connect_result);
+        wifi_connected = false;
+        return false;
+    }
+
+    printf("WiFi: Connected successfully!\n");
+
+    uint32_t ip = cyw43_state.netif[0].ip_addr.addr;
+    printf("WiFi: IP Address: %lu.%lu.%lu.%lu\n",
+           ip & 0xFF, (ip >> 8) & 0xFF, (ip >> 16) & 0xFF, (ip >> 24) & 0xFF);
+
+    wifi_connected = true;
+    return true;
+}
+
+bool init_wifi(void)
+{
+    printf("Core 1: Initializing WiFi...\n");
+
+    if (cyw43_initialized)
+    {
+        printf("Core 1: Deinitializing previous WiFi instance...\n");
+        cyw43_arch_deinit();
+        cyw43_initialized = false;
+        sleep_ms(1000);
+    }
+
+    if (cyw43_arch_init())
+    {
+        printf("Core 1: WiFi init FAILED\n");
+        return false;
+    }
+
+    cyw43_initialized = true;
+    cyw43_arch_enable_sta_mode();
+    printf("Core 1: WiFi STA mode enabled\n");
+
+    if (!try_wifi_connect())
+    {
+        printf("Core 1: Initial WiFi connection FAILED\n");
+        cyw43_arch_deinit();
+        cyw43_initialized = false;
+        return false;
+    }
+
+    printf("*** WIFI FULLY CONNECTED ***\n");
+    wifi_fully_connected = true;
+
+    return true;
+}
+
+void check_wifi_connection(void)
+{
+    uint32_t now = to_ms_since_boot(get_absolute_time());
+
+    if (!cyw43_initialized)
+        return;
+
+    if (now - last_wifi_check < 5000)
+        return;
+
+    last_wifi_check = now;
+
+    int link_status = cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA);
+
+    if (link_status != CYW43_LINK_UP)
+    {
+        if (wifi_connected)
+        {
+            printf("\nCore 1: WiFi connection lost!\n");
+            wifi_connected = false;
+            wifi_fully_connected = false;
+            wifi_disconnect_time = now;
+            reconnect_pending = true;
+        }
+        else if (reconnect_pending && (now - wifi_disconnect_time >= WIFI_RECONNECT_DELAY_MS))
+        {
+            printf("Core 1: Attempting reconnection...\n");
+            reconnect_pending = false;
+            
+            if (try_wifi_connect())
+            {
+                printf("Core 1: WiFi reconnected successfully!\n");
+            }
+            else
+            {
+                wifi_disconnect_time = now;
+                reconnect_pending = true;
+                printf("Core 1: Reconnection failed, will retry...\n");
+            }
+        }
+    }
+    else
+    {
+        if (!wifi_connected)
+        {
+            wifi_connected = true;
+            wifi_fully_connected = true;
+            reconnect_pending = false;
+            printf("Core 1: WiFi link restored!\n");
+        }
+    }
+}
 
 void core1_entry(void)
 {
@@ -970,112 +929,104 @@ void core1_entry(void)
     }
 }
 
-// [------------------------------------------------------------------------- ATEC608B -------------------------------------------------------------------------]
+// [------------------------------------------------------------------------- MAIN -------------------------------------------------------------------------]
 
-/**
- * @brief Utility function to print a buffer in hexadecimal format.
- */
-void print_hex(const uint8_t *data, size_t len) {
-    for (size_t i = 0; i < len; i++) {
-        printf("%02X", data[i]);
-    }
-}
-
-/**
- * @brief Performs a simple device info query to check if the ATECC608B is present and responding.
- * @return ATCA_SUCCESS if the chip is alive, otherwise an error status.
- */
-ATCA_STATUS atecc_is_alive() {
-    uint8_t rev_id[4];
-    return atcab_info(rev_id);
-}
-
-/**
- * @brief Extract and print public key from Slot 0
- * This is executed when GP22 is pressed.
- */
-void atecc_extract_pubkey() {
-    ATCA_STATUS status;
-
-    printf("\n======================================================\n");
-    printf("=== ATECC PUBLIC KEY EXTRACTION (GP22) ===\n");
-    printf("======================================================\n");
-
-    // Check device communication
-    if (atecc_is_alive() != ATCA_SUCCESS) {
-        printf("❌ HARDWARE ERROR: ATECC608B is unresponsive.\n");
-        return;
-    }
-
-    // Extract public key from Slot 0
-    printf("Extracting Public Key from Slot %d...\n", TARGET_SLOT);
-    status = atcab_get_pubkey(TARGET_SLOT, g_public_key);
-
-    if (status != ATCA_SUCCESS) {
-        printf("❌ FAILED: Could not read public key. Status: %d\n", status);
-        return;
-    }
-
-    printf("✅ SUCCESS: Public Key extracted:\n");
-    printf("\"PUBLIC_KEY\": \"");
-    print_hex(g_public_key, ECC_PUB_KEY_SIZE);
-    printf("\"\n");
-    printf("======================================================\n");
-}
-
-/**
- * @brief Uses the ATECC608B's hardware RNG to generate and print 32 bytes of random data.
- * Optional function - can be triggered manually if needed.
- */
-void hardware_rng_test() {
-    ATCA_STATUS status;
-    uint8_t random_data[RNG_SIZE];
-
-    printf("\n======================================================\n");
-    printf("=== HARDWARE RNG TEST ===\n");
-    printf("======================================================\n");
-
-    if (atecc_is_alive() != ATCA_SUCCESS) {
-        printf("❌ HARDWARE ERROR: ATECC608B is unresponsive.\n");
-        return;
-    }
-
-    memset(random_data, 0, RNG_SIZE);
-    status = atcab_random(random_data);
-
-    if (status != ATCA_SUCCESS) {
-        printf("❌ FAILED: atcab_random failed! Status: 0x%02X\n", status);
-    } else {
-        printf("✅ SUCCESS: 32-byte Hardware Random Number:\n");
-        printf("\"RANDOM_DATA\": \"");
-        print_hex(random_data, RNG_SIZE);
-        printf("\"\n");
-    }
-
-    printf("======================================================\n");
-}
-/**
- * @brief Check if ATECC button (GP22) is pressed
- */
-void check_atecc_button(void)
+int main(void)
 {
-    static bool last_button_state = true;
-    static uint32_t debounce_time = 0;
+    board_init();
+    tusb_init();
+    stdio_init_all();
+    tud_init(BOARD_TUD_RHPORT);
+    sleep_ms(10000);
 
-    bool current_state = gpio_get(ATECC_BUTTON_PIN);
-    uint32_t now = to_ms_since_boot(get_absolute_time());
+    // Initialize GPIOs
+    gpio_init(HID_BUTTON_PIN);
+    gpio_set_dir(HID_BUTTON_PIN, GPIO_IN);
+    gpio_pull_up(HID_BUTTON_PIN);
 
-    if (!current_state && last_button_state)
-    {
-        if (now - debounce_time > 200)
-        {
-            printf("\n>>> GP22 Button Pressed! <<<\n");
-            atecc_extract_pubkey();
-            debounce_time = now;
+    gpio_init(WIFI_LED_PIN);
+    gpio_set_dir(WIFI_LED_PIN, GPIO_OUT);
+    gpio_put(WIFI_LED_PIN, 0);
+
+    gpio_init(DNS_LED_PIN);
+    gpio_set_dir(DNS_LED_PIN, GPIO_OUT);
+    gpio_put(DNS_LED_PIN, 0);
+
+    gpio_init(MTLS_LED_PIN);
+    gpio_set_dir(MTLS_LED_PIN, GPIO_OUT);
+    gpio_put(MTLS_LED_PIN, 0);
+
+    // ATECC608B Initialization
+    printf("\n=== Initializing ATECC608B ===\n");
+    
+    i2c_init(I2C_BUS_ID, I2C_BAUDRATE);
+    gpio_set_function(I2C_SDA_PIN, GPIO_FUNC_I2C);
+    gpio_set_function(I2C_SCL_PIN, GPIO_FUNC_I2C);
+    gpio_pull_up(I2C_SDA_PIN);
+    gpio_pull_up(I2C_SCL_PIN);
+    printf("✅ I2C Initialized at %dkHz\n", I2C_BAUDRATE / 1000);
+
+    ATCA_STATUS status = atcab_init(&cfg_atecc608_pico);
+    if (status != ATCA_SUCCESS) {
+        printf("❌ CryptoAuthLib init failed: %d\n", status);
+        printf("⚠️  Continuing without ATECC...\n");
+    } else {
+        printf("✅ ATECC608B initialized successfully\n");
+        
+        if (atecc_is_alive() == ATCA_SUCCESS) {
+            printf("✅ ATECC608B communication verified\n");
         }
     }
+    
+    gpio_init(ATECC_BUTTON_PIN);
+    gpio_set_dir(ATECC_BUTTON_PIN, GPIO_IN);
+    gpio_pull_up(ATECC_BUTTON_PIN);
+    
+    printf("=== ATECC Ready: Press GP22 to extract public key ===\n\n");
 
-    last_button_state = current_state;
+    // Launch WiFi on Core 1
+    multicore_launch_core1(core1_entry);
+    sleep_ms(2000);
+
+    // Core 0 main loop
+    while (true)
+    {
+        tud_task();
+        hid_task();
+        check_atecc_button();
+
+        int c = getchar_timeout_us(0);
+
+        if (c != PICO_ERROR_TIMEOUT)
+        {
+            if (c == '\r' || c == '\n')
+            {
+                if (rx_index < RX_BUFFER_SIZE)
+                {
+                    rx_buffer[rx_index] = '\0';
+                }
+                else
+                {
+                    rx_buffer[RX_BUFFER_SIZE - 1] = '\0';
+                }
+
+                if (rx_index > 0 && rx_buffer[0] == '{')
+                {
+                    process_json_data(rx_buffer);
+                }
+
+                rx_index = 0;
+            }
+            else if (rx_index < RX_BUFFER_SIZE - 1)
+            {
+                rx_buffer[rx_index++] = c;
+            }
+        }
+
+        tight_loop_contents();
+    }
+
+    return 0;
 }
 
 
