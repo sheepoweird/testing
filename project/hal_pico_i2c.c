@@ -92,19 +92,19 @@ ATCA_STATUS hal_i2c_post_init(ATCAIface iface) {
  * - Regular command transmission
  */
 ATCA_STATUS hal_i2c_send(ATCAIface iface, uint8_t address, uint8_t* data, int len) {
-    printf("HAL: Send to addr 0x%02X, len %d: ", address, len);
+    // printf("HAL: Send to addr 0x%02X, len %d: ", address, len);
     if (len > 0 && data) {
         for (int i = 0; i < len && i < 8; i++) {
-            printf("%02X ", data[i]);
+            // printf("%02X ", data[i]);
         }
         if (len > 8) printf("...");
     }
-    printf("\n");
+    // printf("\n");
     
     // SPECIAL CASE 1: Wake sequence detection
     // CryptoAuthLib sends to 0x00 or 0x01 with 0 bytes to trigger wake
     if ((address == 0x00 || address == 0x01) && len == 0) {
-        printf("HAL: Wake sequence detected - performing GPIO wake\n");
+        // printf("HAL: Wake sequence detected - performing GPIO wake\n");
         
         // Execute GPIO-based wake pulse
         gpio_set_function(HAL_I2C_SDA_PIN, GPIO_FUNC_SIO);  // Switch to GPIO
@@ -119,43 +119,43 @@ ATCA_STATUS hal_i2c_send(ATCAIface iface, uint8_t address, uint8_t* data, int le
         
         sleep_ms(2);                                         // Wait 2ms for wake
         
-        printf("HAL: Wake pulse complete\n");
+        // printf("HAL: Wake pulse complete\n");
         return ATCA_SUCCESS;
     }
     
     // Validate parameters for regular transmission
     if (!data || len <= 0) {
-        printf("HAL: Bad params\n");
+        // printf("\nHAL: Bad params\n");
         return ATCA_BAD_PARAM;
     }
     
     // SPECIAL CASE 2: Word address prepending
     // Some CryptoAuthLib operations use 0x02/0x03 as word addresses
     if (address == 0x02 || address == 0x03) {
-        printf("HAL: Detected word address 0x%02X, prepending to command\n", address);
+        // printf("HAL: Detected word address 0x%02X, prepending to command\n", address);
         
         // Create buffer with word address prepended
         uint8_t full_cmd[len + 1];
         full_cmd[0] = address;              // Word address first
         memcpy(full_cmd + 1, data, len);    // Then command data
         
-        printf("HAL: Full command: ");
+        // printf("HAL: Full command: ");
         for (int i = 0; i < len + 1; i++) {
-            printf("%02X ", full_cmd[i]);
+            // printf("%02X ", full_cmd[i]);
         }
-        printf("\n");
+        // printf("\n");
         
         // Send to device address 0x60
         int result = i2c_write_blocking(HAL_I2C_INSTANCE, HAL_I2C_DEVICE_ADDR, 
                                         full_cmd, len + 1, false);
-        printf("HAL: Write result: %d (expected %d)\n", result, len + 1);
+        // printf("HAL: Write result: %d (expected %d)\n", result, len + 1);
         
         return (result == len + 1) ? ATCA_SUCCESS : ATCA_COMM_FAIL;
     }
     
     // REGULAR CASE: Standard I2C transmission
     int result = i2c_write_blocking(HAL_I2C_INSTANCE, address, data, len, false);
-    printf("HAL: Write result: %d (expected %d)\n", result, len);
+    // printf("HAL: Write result: %d (expected %d)\n", result, len);
     
     if (result == len) {
         return ATCA_SUCCESS;
@@ -168,24 +168,24 @@ ATCA_STATUS hal_i2c_send(ATCAIface iface, uint8_t address, uint8_t* data, int le
  * @brief Receive data over I2C from ATECC608B
  */
 ATCA_STATUS hal_i2c_receive(ATCAIface iface, uint8_t address, uint8_t* data, uint16_t* len) {
-    printf("HAL: Receive from addr 0x%02X, expecting %d bytes\n", address, len ? *len : 0);
+    // printf("HAL: Receive from addr 0x%02X, expecting %d bytes\n", address, len ? *len : 0);
     
     if (!data || !len || *len == 0) {
-        printf("HAL: Bad receive params\n");
+        // printf("HAL: Bad receive params\n");
         return ATCA_BAD_PARAM;
     }
     
     // Perform blocking I2C read
     int result = i2c_read_blocking(HAL_I2C_INSTANCE, address, data, *len, false);
     
-    printf("HAL: Read result: %d bytes: ", result);
+    // printf("HAL: Read result: %d bytes: ", result);
     if (result > 0) {
         for (int i = 0; i < result && i < 8; i++) {
-            printf("%02X ", data[i]);
+            // printf("%02X ", data[i]);
         }
         if (result > 8) printf("...");
     }
-    printf("\n");
+    // printf("\n");
     
     if (result == *len) {
         return ATCA_SUCCESS;
@@ -199,7 +199,7 @@ ATCA_STATUS hal_i2c_receive(ATCAIface iface, uint8_t address, uint8_t* data, uin
  * @brief Control function for special operations (wake, idle, sleep)
  */
 ATCA_STATUS hal_i2c_control(ATCAIface iface, uint8_t option, void* param, size_t paramlen) {
-    printf("HAL: Control called with option 0x%02X\n", option);
+    // printf("HAL: Control called with option 0x%02X\n", option);
     
     // Handle wake operation (option 0x01)
     if (option == 0x01) {
