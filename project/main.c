@@ -937,7 +937,6 @@ int main(void)
     tusb_init();
     stdio_init_all();
     tud_init(BOARD_TUD_RHPORT);
-    sleep_ms(10000);
 
     // Initialize GPIOs
     gpio_init(HID_BUTTON_PIN);
