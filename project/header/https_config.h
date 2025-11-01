@@ -2,13 +2,13 @@
 #define HTTPS_CONFIG_H
 
 // Webhook.site configuration
-#define WEBHOOK_HOSTNAME "192.168.68.57"
-#define WEBHOOK_TOKEN ""
-#define WIFI_SSID "Aydil"
-#define WIFI_PASSWORD "12345678"
+#define WEBHOOK_HOSTNAME "webhook.site"
+#define WEBHOOK_TOKEN "484a6490-f588-4225-b7c8-0bc0a99f5f01"
+#define WIFI_SSID "Zzz"
+#define WIFI_PASSWORD "i6b22krm"
 
 // HTTPS Certificate - ISRG Root X1 (Let's Encrypt Root)
-#define CA_CERT_XXX \
+#define CA_CERT \
 "-----BEGIN CERTIFICATE-----\n" \
 "MIIFazCCA1OgAwIBAgIRAIIQz7DSQONZRGPgu2OCiwAwDQYJKoZIhvcNAQELBQAw\n" \
 "TzELMAkGA1UEBhMCVVMxKTAnBgNVBAoTIEludGVybmV0IFNlY3VyaXR5IFJlc2Vh\n" \
@@ -43,7 +43,7 @@
 
 
 // Local mTLS web cert (rename later)
-#define CA_CERT \
+#define CA_CERT_XXX \
 "-----BEGIN CERTIFICATE-----\n" \
 "MIIBgzCCASmgAwIBAgIUYNeoW0ibMxDhGrrCzT9gb2Kha1wwCgYIKoZIzj0EAwIw\n" \
 "FzEVMBMGA1UEAwwMTG9jYWwgRGV2IENBMB4XDTI1MTAyNjAyMzg1NloXDTM1MTAy\n" \

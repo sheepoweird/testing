@@ -1036,12 +1036,12 @@ int main(void)
 // Blinking = In process
 // On = Success
 
-// LED 6 WIFI Connection status
-// LED 7 DNS Status
+// LED 6 WIFI Connection status ✅
+// LED 7 DNS Status ✅
 // LED 8 MTLS Status 
 // LED 9 Write to server Fail (blinking only else off)
 
-// remove FATFS (no longer being used)
+// remove FATFS (might need to re-add write for writing public key and certs)
 
 
 
