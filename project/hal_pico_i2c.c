@@ -38,20 +38,20 @@ void hal_free(void* ptr) {
 // ============================================================================
 
 void hal_delay_ms(uint32_t ms) {
-    sleep_ms(ms);
+    busy_wait_ms(ms);
 }
 
 void hal_delay_us(uint32_t us) {
-    sleep_us(us);
+    busy_wait_us(us);
 }
 
 // Alternative names that some parts of CryptoAuthLib may expect
 void atca_delay_ms(uint32_t ms) {
-    sleep_ms(ms);
+    busy_wait_ms(ms);
 }
 
 void atca_delay_us(uint32_t us) {
-    sleep_us(us);
+    busy_wait_us(us);
 }
 
 // ============================================================================
@@ -111,13 +111,13 @@ ATCA_STATUS hal_i2c_send(ATCAIface iface, uint8_t address, uint8_t* data, int le
         gpio_set_dir(HAL_I2C_SDA_PIN, GPIO_OUT);             // Set as output
         gpio_put(HAL_I2C_SDA_PIN, 0);                        // Drive SDA LOW
         
-        sleep_us(80);                                        // Hold low for 80µs
+        busy_wait_us(80);                                        // Hold low for 80µs
         
         gpio_put(HAL_I2C_SDA_PIN, 1);                        // Release SDA
         gpio_set_function(HAL_I2C_SDA_PIN, GPIO_FUNC_I2C);   // Switch back to I2C
         gpio_pull_up(HAL_I2C_SDA_PIN);
         
-        sleep_ms(2);                                         // Wait 2ms for wake
+        busy_wait_ms(2);                                         // Wait 2ms for wake
         
         // printf("HAL: Wake pulse complete\n");
         return ATCA_SUCCESS;
@@ -209,13 +209,13 @@ ATCA_STATUS hal_i2c_control(ATCAIface iface, uint8_t option, void* param, size_t
         gpio_set_dir(HAL_I2C_SDA_PIN, GPIO_OUT);             // Set as output
         gpio_put(HAL_I2C_SDA_PIN, 0);                        // Drive SDA LOW
         
-        sleep_us(80);                                        // Hold low for 80µs
+        busy_wait_us(80);                                        // Hold low for 80µs
         
         gpio_put(HAL_I2C_SDA_PIN, 1);                        // Release SDA
         gpio_set_function(HAL_I2C_SDA_PIN, GPIO_FUNC_I2C);   // Switch back to I2C
         gpio_pull_up(HAL_I2C_SDA_PIN);
         
-        sleep_ms(2);                                         // Wait 2ms for wake
+        busy_wait_ms(2);                                         // Wait 2ms for wake
         
         printf("HAL: Wake pulse complete\n");
         return ATCA_SUCCESS;

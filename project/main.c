@@ -25,11 +25,22 @@
 #include "hardware/i2c.h"
 #include "cryptoauthlib.h"
 #include "atca_basic.h"
+#include "atca_mbedtls_wrap.h"
+#include <mbedtls/error.h>
+#include "mbedtls/ecdsa.h"
+#include "mbedtls/pk.h"
+#include "mbedtls/x509_crt.h"
+#include <mbedtls/debug.h>
+
+#define MBEDTLS_ECDSA_SIGN_ALT
+
+
 
 #define HID_BUTTON_PIN 20
 #define WIFI_LED_PIN 6
 #define DNS_LED_PIN 7
 #define MTLS_LED_PIN 8
+
 
 // ATECC Configuration
 #define ATECC_BUTTON_PIN 22
@@ -51,7 +62,7 @@
 #define WIFI_RECONNECT_DELAY_MS 5000
 
 // MTLS CONFIGURATION
-// #define MTLS_ENABLED
+#define MTLS_ENABLED
 
 // POST CONFIGURATION
 #define AUTO_POST_ON_SAMPLE
@@ -88,6 +99,12 @@ typedef struct
     uint8_t key;
 } key_action_t;
 
+typedef struct {
+    mbedtls_ssl_config conf; //ca cert
+    mbedtls_x509_crt *cert; // ca cert
+    mbedtls_x509_crt *cert_chain;//client cert
+    mbedtls_pk_context *pkey; //private  key we injecting
+}altcp_tls_config_internal_t;
 // GLOBAL VARIABLES
 
 // Serial buffer
@@ -118,6 +135,8 @@ ATCAIfaceCfg cfg_atecc608_pico = {
     .cfg_data   = NULL
 };
 
+
+
 // HTTPS state
 static https_state_t https_state = {0};
 
@@ -141,6 +160,13 @@ static bool cyw43_initialized = false;
 // HID sequence
 static key_action_t sequence[MAX_SEQ];
 static int seq_len = 0;
+
+//mtls state
+static bool g_atecc_pk_initialized = false;
+static mbedtls_pk_context g_atecc_pk_ctx;
+bool init_atecc_pk_context(void);
+
+
 
 // [------------------------------------------------------------------------- ATECC608B -------------------------------------------------------------------------]
 
@@ -224,12 +250,61 @@ void check_atecc_button(void)
         {
             printf("\n>>> GP22 Button Pressed! <<<\n");
             atecc_extract_pubkey();
+            if (!current_health.valid) {
+                printf("❌ No health data available — generating test data\n");
+                generate_test_health_data();
+            }
             debounce_time = now;
         }
     }
 
     last_button_state = current_state;
 }
+static void mbedtls_debug( void *ctx, int level, const char *file, int line, const char *str){
+    ((void) ctx);
+    ((void) level);
+    printf("%s:%04d: %s", file, line, str);
+}
+
+///To DELETE
+void my_debug(void *ctx, int level, const char *file, int line, const char *str)
+{
+    printf("[mbedTLS] %s:%d: %s\n", file, line, str);
+}
+/**
+ * @brief Create test health data for manual POST testing
+ */
+void generate_test_health_data(void)
+{
+    current_health.cpu        = 23.4f;
+    current_health.memory     = 58.7f;
+    current_health.disk       = 72.1f;
+    current_health.net_in     = 102.5f;
+    current_health.net_out    = 88.3f;
+    current_health.processes  = 47;
+    current_health.valid      = true;
+
+    sample_count = 1;
+    last_data_time = to_ms_since_boot(get_absolute_time());
+
+    printf("✅ Test health data generated:\n");
+    printf("   CPU: %.1f%%, MEM: %.1f%%, DISK: %.1f%%\n", 
+           current_health.cpu, current_health.memory, current_health.disk);
+    printf("   NET ↓: %.1f KB/s, ↑: %.1f KB/s, PROC: %d\n", 
+           current_health.net_in, current_health.net_out, current_health.processes);
+}
+
+int atecc_pk_sign_wrapper(void *ctx,
+                          mbedtls_md_type_t md_alg,
+                          const unsigned char *hash,
+                          size_t hash_len,
+                          unsigned char *sig,
+                          size_t sig_size,
+                          size_t *sig_len_out,
+                          int (*f_rng)(void *, unsigned char *, size_t),
+                          void *p_rng);
+
+///
 
 // [------------------------------------------------------------------------- JSON PROCESSING -------------------------------------------------------------------------]
 
@@ -479,6 +554,11 @@ err_t https_recv_callback(void* arg, struct altcp_pcb* tpcb, struct pbuf* p, err
     https_state_t* state = (https_state_t*)arg;
     
     if (p == NULL) {
+        altcp_close(tpcb);
+        state->pcb=NULL;
+        state->connected=false;
+        state->operation_in_progress=false;
+        webhook_in_progress=false;
         printf("Connection closed by server\n");
         return ERR_OK;
     }
@@ -486,8 +566,16 @@ err_t https_recv_callback(void* arg, struct altcp_pcb* tpcb, struct pbuf* p, err
     state->bytes_received += p->tot_len;
     
     altcp_recved(tpcb, p->tot_len);
+    altcp_close(tpcb);
     pbuf_free(p);
-    
+    if (https_state.pcb != NULL) {
+        altcp_close(https_state.pcb);
+        https_state.pcb = NULL;
+    }
+    if (https_state.tls_config != NULL) {
+        altcp_tls_free_config(https_state.tls_config);
+        https_state.tls_config = NULL;
+    }
     return ERR_OK;
 }
 
@@ -500,6 +588,91 @@ void https_err_callback(void* arg, err_t err)
 }
 
 // [------------------------------------------------------------------------- HTTPS -------------------------------------------------------------------------]
+
+int atca_mbedtls_ecdsa_sign(const mbedtls_mpi* data, mbedtls_mpi* r, mbedtls_mpi* s,
+                            const unsigned char* msg, size_t msg_len)
+{
+    (void)data;  // Unused — ATECC uses slot instead
+
+    if (!msg || msg_len != 32 || !r || !s) {
+        return MBEDTLS_ERR_ECP_BAD_INPUT_DATA;
+    }
+
+    printf("📝 ATECC hardware signing called (slot %d)\n", TARGET_SLOT);
+
+    uint8_t signature[64];
+    ATCA_STATUS status = atcab_sign(TARGET_SLOT, msg, signature);
+
+    if (status != ATCA_SUCCESS) {
+        printf("❌ ATECC sign failed: 0x%02X\n", status);
+        return MBEDTLS_ERR_PK_ALLOC_FAILED;
+    }
+
+    printf("✅ ATECC signature generated\n");
+
+    int ret = mbedtls_mpi_read_binary(r, signature, 32);
+    if (ret != 0) {
+        printf("❌ Failed to read R: -0x%04x\n", -ret);
+        return ret;
+    }
+
+    ret = mbedtls_mpi_read_binary(s, signature + 32, 32);
+    if (ret != 0) {
+        printf("❌ Failed to read S: -0x%04x\n", -ret);
+        return ret;
+    }
+    return ret;
+}
+
+int mbedtls_ecdsa_sign(mbedtls_ecp_group *grp, 
+                        mbedtls_mpi *r, 
+                        mbedtls_mpi *s,
+                        const mbedtls_mpi *d, 
+                        const unsigned char *buf, 
+                        size_t blen,
+                        int (*f_rng)(void *, unsigned char *, size_t), 
+                        void *p_rng) {
+        fflush(stdout);
+        ATCA_STATUS status;
+        printf("🚨🚨🚨 MBEDTLS_ECDSA_SIGN CALLED! 🚨🚨🚨\n");
+        printf("bettter be called");
+        printf("Buffer length: %zu\n", blen);
+        
+        // Convert the MPI hash to a 32-byte buffer for ATECC
+        uint8_t hash[32];
+        status = atcab_random(hash);///hello
+        if (blen != 32) {
+            printf("❌ Expected 32-byte hash, got %zu\n", blen);
+            return MBEDTLS_ERR_ECP_BAD_INPUT_DATA;
+        }
+        memcpy(hash, buf, 32);
+        
+        // Call ATECC hardware to sign
+        uint8_t signature[64];
+        status = atcab_sign(TARGET_SLOT, hash, signature);
+        
+        if (status != ATCA_SUCCESS) {
+            printf("❌ ATECC sign failed: 0x%02X\n", status);
+        }
+        
+        // Convert ATECC signature (R||S) to mbedTLS MPIs
+        int ret = mbedtls_mpi_read_binary(r, signature, 32);
+        if (ret != 0) {
+            printf("❌ Failed to read R: -0x%04x\n", -ret);
+            return ret;
+        }
+        
+        ret = mbedtls_mpi_read_binary(s, signature + 32, 32);
+        if (ret != 0) {
+            printf("❌ Failed to read S: -0x%04x\n", -ret);
+            return ret;
+        }
+        
+    printf("✅ ATECC signature successful!\n");
+    return 0;
+}
+
+
 
 void send_webhook_post(health_data_t* data)
 {
@@ -529,7 +702,7 @@ void send_webhook_post(health_data_t* data)
     
     if (dns_err == ERR_INPROGRESS) {
         int timeout = 0;
-        while (server_ip.addr == 0 && timeout < 50) {
+        while (server_ip.addr == 0 && timeout < 100) {
             cyw43_arch_poll();
             sleep_ms(100);
             timeout++;
@@ -552,11 +725,10 @@ void send_webhook_post(health_data_t* data)
     
 #ifdef MTLS_ENABLED
     u8_t client_cert[] = CLIENT_CERT;
-    u8_t client_key[] = CLIENT_KEY;
-    
     https_state.tls_config = altcp_tls_create_config_client_2wayauth(
         ca_cert, sizeof(ca_cert),
-        client_key, sizeof(client_key),
+    // client_key, sizeof(client_key), //modify library to check for (!cert) only reomve &&!privkey portion
+        NULL, 0,
         NULL, 0,
         client_cert, sizeof(client_cert)
     );
@@ -565,15 +737,65 @@ void send_webhook_post(health_data_t* data)
         ca_cert, sizeof(ca_cert)
     );
 #endif
+    //Integrating ATECC, injection start===============
 
-    if (!https_state.tls_config) {
-        printf("TLS cfg fail\n");
-        gpio_put(MTLS_LED_PIN, 0);
-        https_state.operation_in_progress = false;
-        webhook_in_progress = false;
-        return;
+    if (https_state.tls_config && g_atecc_pk_initialized){
+        altcp_tls_config_internal_t* cfg_internal = 
+            (altcp_tls_config_internal_t*)https_state.tls_config;
+        if (cfg_internal != NULL){
+            mbedtls_ssl_conf_dbg(&cfg_internal->conf, mbedtls_debug, NULL);
+            mbedtls_ssl_conf_authmode(&cfg_internal->conf, MBEDTLS_SSL_VERIFY_REQUIRED);
+            
+            //Allocate Client cert chain
+            if(cfg_internal->cert_chain == NULL){
+                cfg_internal->cert_chain = (mbedtls_x509_crt *)malloc(sizeof(mbedtls_x509_crt));
+                if(cfg_internal->cert_chain == NULL){
+                    printf("config error: failed to allocatememory for cleint cert chain\n");
+                    return;
+                }
+                printf("memory allocated for cert chain\n");
+            }
+            mbedtls_x509_crt_init(cfg_internal->cert_chain);
+            u8_t client_cert_safe[] = CLIENT_CERT "\0";
+            size_t cert_len_plus_null = strlen((const char *)client_cert_safe) +1;
+            int ret = mbedtls_x509_crt_parse(cfg_internal->cert_chain, client_cert_safe, cert_len_plus_null);
+            // After mbedtls_ssl_conf_own_cert:
+            printf("mbedtls_ssl_conf_own_cert returned: %d\n", ret);
+            if (ret != 0) {
+                    printf("❌ Failed to parse client certificate: %d\n", ret);
+                    free(cfg_internal->cert_chain);
+                    cfg_internal->cert_chain = NULL;
+                    return;
+                }
+                
+                // Make sure ATECC PK context is initiated
+                if(!init_atecc_pk_context()){
+                    printf("❌ Failed to initialize ATECC PK context.\n");
+                    return;
+                }
+                printf("PK info: %s\n", mbedtls_pk_get_name(&g_atecc_pk_ctx));
+            printf("PK can sign? %d\n", mbedtls_pk_can_do(&g_atecc_pk_ctx, MBEDTLS_PK_ECKEY));
+
+                cfg_internal->pkey = &g_atecc_pk_ctx; // Inject ATECC PK context
+                uint8_t test_hash[32] = {0xAA}; // Simple pattern
+                uint8_t test_sig[64];
+                size_t test_sig_len = 0;
+                ret = mbedtls_ssl_conf_own_cert(&cfg_internal->conf, 
+                                        cfg_internal->cert_chain, 
+                                        &g_atecc_pk_ctx);
+                printf("mbedtls_ssl_conf_own_cert returned: %d\n", ret);
+
+                if (ret == 0) {
+                    printf("✅ Successfully configured TLS to use &g_atecc_pk_ctx (points to ATECC chip)\n");
+                } else {
+                    printf("⚠️  ATECC injection failed: -0x%04x\n", -ret);
+                    printf("⚠️  Falling back to software key\n");
+                }
+        }else{
+            printf("atecc not available, using softwrae\n");
+        }
+        //injection end ======
     }
-
     // Step 3: Create new PCB
     https_state.pcb = altcp_tls_new(https_state.tls_config, IPADDR_TYPE_V4);
 
@@ -602,7 +824,7 @@ void send_webhook_post(health_data_t* data)
         https_state.pcb = NULL;
         https_state.operation_in_progress = false;
         webhook_in_progress = false;
-        return;
+        return;  
     }
 
     // Step 5: Set callbacks
@@ -633,7 +855,7 @@ void send_webhook_post(health_data_t* data)
 
     // Step 7: Wait for TLS handshake
     int timeout = 0;
-    while (!https_state.connected && timeout < 100) {
+    while (!https_state.connected && timeout < 1000) {
         cyw43_arch_poll();
         sleep_ms(100);
         timeout++;
@@ -666,7 +888,7 @@ void send_webhook_post(health_data_t* data)
                             https_state.pending_data.net_out,
                             https_state.pending_data.processes);
 
-    char request[600];
+    char request[2048];
     int req_len = snprintf(request, sizeof(request),
                            "POST /%s HTTP/1.1\r\n"
                            "Host: %s\r\n"
@@ -686,8 +908,8 @@ void send_webhook_post(health_data_t* data)
         altcp_output(https_state.pcb);
         https_state.request_sent = true;
 
-        // Wait for response (shorter timeout)
-        for (int i = 0; i < 20; i++) {
+        // Wait for response (longer timeout)
+        for (int i = 0; i < 500; i++) {
             cyw43_arch_poll();
             sleep_ms(100);
         }
@@ -720,6 +942,47 @@ void send_webhook_post(health_data_t* data)
     https_state.operation_in_progress = false;
     webhook_in_progress = false;
 }
+
+bool init_atecc_pk_context(void){
+    if (!g_atecc_pk_initialized){
+        mbedtls_pk_init(&g_atecc_pk_ctx);
+        int ret = mbedtls_pk_setup(&g_atecc_pk_ctx, mbedtls_pk_info_from_type(MBEDTLS_PK_ECKEY));      
+        if (ret !=0){
+            printf("❌ mbedtls_pk_setup failed: -0x%04x\n", -ret);
+            return false;
+        }
+        g_atecc_pk_initialized = true;
+
+        printf("⚠️  We need to manually hook the signing function atca wrapper\n");
+        debug_pk_context("After init", &g_atecc_pk_ctx);
+
+        // Test signing directly with correct signature
+        uint8_t test_hash[32] = {0};
+        uint8_t test_sig[64];
+        size_t sig_len = 0;
+        int test_ret = mbedtls_pk_sign(&g_atecc_pk_ctx, MBEDTLS_MD_SHA256, 
+                                    test_hash, 32, test_sig, sizeof(test_sig), &sig_len, NULL, NULL);
+        printf("Direct PK sign test returned: %d, sig_len: %zu\n", test_ret, sig_len);
+    }
+    return true;
+}
+
+
+void debug_pk_context(const char* label, mbedtls_pk_context* pk) {
+    printf("=== %s ===\n", label);
+    printf("PK type: %d\n", mbedtls_pk_get_type(pk));
+    printf("PK name: %s\n", mbedtls_pk_get_name(pk));
+    
+    if (mbedtls_pk_get_type(pk) == MBEDTLS_PK_ECKEY) {
+        mbedtls_ecp_keypair* ecp = mbedtls_pk_ec(*pk);
+        printf("ECP items(?) %d\n", ecp);
+        printf("items %p\n",ecp);
+    }
+    printf("================\n");
+}
+
+
+
 
 // [------------------------------------------------------------------------- Core 1 - WiFi Handler -------------------------------------------------------------------------]
 
@@ -974,6 +1237,11 @@ int main(void)
         
         if (atecc_is_alive() == ATCA_SUCCESS) {
             printf("✅ ATECC608B communication verified\n");
+            if (!init_atecc_pk_context()){
+                printf("atecc pk context initialization failed\n");
+            }else{
+                printf("atecc pk context initialized\n");
+            }
         }
     }
     
