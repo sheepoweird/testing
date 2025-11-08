@@ -718,31 +718,35 @@ void core1_entry(void)
     printf("Core 1: Starting WiFi on separate core\n");
     sleep_ms(1000);
     
-    while (true) 
+    while (true)
     {
         int attempt_count = 0;
         
+        // Ensure a delay happens before the FIRST INITIAL attempt
+        if (wifi_manager_get_state()->is_initialized) {
+            printf("Core 1: Forcing de-init and delay...\n");
+            wifi_manager_deinit(); 
+            sleep_ms(WIFI_RECONNECT_DELAY_MS);
+        }
+        
         while (true)
         {
-            if (attempt_count > 0)
+            if (attempt_count > 0) // This logic is now purely for subsequent retries
             {
                 printf("Core 1: Retry attempt %d in %d seconds...\n", 
                         attempt_count + 1, 
                         WIFI_RECONNECT_DELAY_MS / 1000);
                 
-                // De-init the driver to reset it
                 wifi_manager_deinit(); 
                 sleep_ms(WIFI_RECONNECT_DELAY_MS);
             }
 
-            printf("Core 1: Initializing WiFi hardware...\n");
             if (!wifi_manager_init()) {
                 printf("Core 1: WiFi init FAILED\n");
                 attempt_count++;
                 continue; // Retry after delay
             }
 
-            printf("Core 1: Connecting to WiFi network...\n");
             if (!wifi_manager_connect(WIFI_SSID, WIFI_PASSWORD, WIFI_CONNECT_TIMEOUT_MS)) {
                 printf("Core 1: WiFi connection FAILED\n");
                 attempt_count++;
@@ -757,13 +761,8 @@ void core1_entry(void)
 
         while (wifi_manager_is_connected()) 
         {
+            wifi_manager_check_status(); 
             wifi_manager_poll();
-            
-            if (!wifi_manager_is_connected())
-            {
-                printf("Core 1: Connection dropped. Restarting full reconnect sequence...\n");
-                break; 
-            }
             
             if (webhook_trigger && !webhook_in_progress)
             {
