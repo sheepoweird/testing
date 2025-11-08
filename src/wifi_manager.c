@@ -246,21 +246,15 @@ void wifi_manager_deinit(void)
     }
 }
 
-
-/**
- * @brief Checks if the network interface has a valid IP address assigned.
- * This is the definition of "fully connected" (link up + DHCP complete).
- */
 static void wifi_check_full_connection(void)
 {
     // Check if the link is up
     if (cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA) == CYW43_LINK_UP)
     {
-        // FIX 1: Replaced '->' with '.' to resolve "operator applied to struct" error.
         if (cyw43_state.netif[CYW43_ITF_STA].ip_addr.addr != 0) 
         {
             if (!g_wifi_state.is_fully_connected) {
-                printf("WiFi Manager: IP address assigned: %s\n", 
+                printf("WiFi Manager: IP address: %s\n", 
                        // FIX 2: Added '&' to pass a pointer to netif_ip4_addr().
                        ip4addr_ntoa(netif_ip4_addr(&cyw43_state.netif[CYW43_ITF_STA]))); 
             }

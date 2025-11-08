@@ -257,9 +257,7 @@ void my_debug(void *ctx, int level, const char *file, int line, const char *str)
 {
     printf("[mbedTLS] %s:%d: %s\n", file, line, str);
 }
-/**
- * @brief Create test health data for manual POST testing
- */
+
 void generate_test_health_data(void)
 {
     current_health.cpu        = 23.4f;
@@ -511,10 +509,6 @@ void debug_pk_context(const char* label, mbedtls_pk_context* pk) {
 
 // [------------------------------------------------------------------------- Core 1 - WiFi Handler -------------------------------------------------------------------------]
 
-/**
- * @brief Initialize WiFi using wifi_manager module
- * * @return true if WiFi initialization and connection successful
- */
 bool init_wifi(void)
 {
     printf("\n=== Initializing WiFi ===\n");
@@ -542,7 +536,6 @@ bool init_wifi(void)
 
 void check_wifi_connection(void)
 {
-    /* Check WiFi status */
     wifi_status_t status = wifi_manager_check_status();
     
     /* Handle reconnection if needed */
@@ -551,9 +544,6 @@ void check_wifi_connection(void)
     {
         wifi_manager_handle_reconnect();
     }
-    
-    // This is less reliable here, moved to core1_entry loop for continuous update
-    // wifi_fully_connected = wifi_manager_is_fully_connected();
 }
 
 void core1_entry(void)
@@ -564,8 +554,7 @@ void core1_entry(void)
     while (true)
     {
         int attempt_count = 0;
-        
-        // Ensure a delay happens before the FIRST INITIAL attempt
+
         if (wifi_manager_get_state()->is_initialized) {
             printf("Core 1: Forcing de-init and delay...\n");
             wifi_manager_deinit(); 
@@ -574,7 +563,7 @@ void core1_entry(void)
         
         while (true)
         {
-            if (attempt_count > 0) // This logic is now purely for subsequent retries
+            if (attempt_count > 0)
             {
                 printf("Core 1: Retry attempt %d in %d seconds...\n", 
                         attempt_count + 1, 
@@ -623,8 +612,7 @@ void core1_entry(void)
 
         while (wifi_manager_is_connected()) 
         {
-            // NEW FIX: Continuously update the flag, although it should be true here, 
-            // a check ensures Core 0 gets the most recent state.
+            // a check to ensures Core 0 gets the most recent state.
             wifi_fully_connected = wifi_manager_is_fully_connected(); 
             
             wifi_manager_check_status(); 
@@ -666,6 +654,10 @@ int main(void)
     gpio_init(MTLS_LED_PIN);
     gpio_set_dir(MTLS_LED_PIN, GPIO_OUT);
     gpio_put(MTLS_LED_PIN, 0);
+    
+    gpio_init(ATECC_BUTTON_PIN);
+    gpio_set_dir(ATECC_BUTTON_PIN, GPIO_IN);
+    gpio_pull_up(ATECC_BUTTON_PIN);
 
     // ATECC608B Initialization
     printf("\n=== Initializing ATECC608B ===\n");
@@ -675,15 +667,11 @@ int main(void)
     gpio_set_function(I2C_SCL_PIN, GPIO_FUNC_I2C);
     gpio_pull_up(I2C_SDA_PIN);
     gpio_pull_up(I2C_SCL_PIN);
-    printf("✅ I2C Initialized at %dkHz\n", I2C_BAUDRATE / 1000);
 
     ATCA_STATUS status = atcab_init(&cfg_atecc608_pico);
     if (status != ATCA_SUCCESS) {
-        printf("❌ CryptoAuthLib init failed: %d\n", status);
-        printf("⚠️  Continuing without ATECC...\n");
+        printf("❌ CryptoAuthLib init failed: %d. Continuing without ATECC...\n", status);
     } else {
-        printf("✅ ATECC608B initialized successfully\n");
-        
         if (atecc_is_alive() == ATCA_SUCCESS) {
             printf("✅ ATECC608B communication verified\n");
             if (!init_atecc_pk_context()){
@@ -693,12 +681,6 @@ int main(void)
             }
         }
     }
-    
-    gpio_init(ATECC_BUTTON_PIN);
-    gpio_set_dir(ATECC_BUTTON_PIN, GPIO_IN);
-    gpio_pull_up(ATECC_BUTTON_PIN);
-    
-    printf("=== ATECC Ready: Press GP22 to extract public key ===\n\n");
 
     // Initialize HID Manager
     hid_config_t hid_cfg = {
@@ -761,14 +743,6 @@ int main(void)
         hid_manager_task(wifi_fully_connected, usb_mounted);
         check_atecc_button();
 
-        // Periodic debug print for state monitoring
-        static uint32_t last_debug_print = 0;
-        uint32_t now = to_ms_since_boot(get_absolute_time());
-        if (now - last_debug_print > 1000) {
-            printf("DEBUG: Core 0 status: WiFi=%d (Fully Connected), USB=%d (Mounted), HID_status=%d\n",
-                   wifi_fully_connected, usb_mounted, hid_manager_get_status());
-            last_debug_print = now;
-        }
 
         int c = getchar_timeout_us(0);
 
