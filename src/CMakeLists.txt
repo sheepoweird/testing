@@ -61,7 +61,7 @@ target_link_libraries(${PROGRAM_NAME} PRIVATE
 )
 
 target_include_directories(${PROGRAM_NAME} PRIVATE
-  ${CMAKE_CURRENT_LIST_DIR}/header
+  ${CMAKE_CURRENT_LIST_DIR}/include
   ${CMAKE_CURRENT_LIST_DIR}
 
   #ATECC Libraries
