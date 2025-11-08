@@ -27,8 +27,8 @@ project(${PROGRAM_NAME})
 
 pico_sdk_init()
 
-add_subdirectory(../src build)
-add_subdirectory(../include/cryptoauthlib/lib build_cryptoauth) 
+add_subdirectory(../lib/sd_card sd_build)
+add_subdirectory(../lib/cryptoauthlib/lib build_cryptoauth) 
 
 add_executable(${PROGRAM_NAME}
     hw_config.c
@@ -38,7 +38,7 @@ add_executable(${PROGRAM_NAME}
     usb_descriptors.c
     #ATECC Libraries
     hal_pico_i2c.c 
-    ../include/cryptoauthlib/lib/mbedtls/atca_mbedtls_wrap.c
+    ../lib/cryptoauthlib/lib/mbedtls/atca_mbedtls_wrap.c
 )
 
 target_link_libraries(${PROGRAM_NAME} PRIVATE
@@ -65,12 +65,12 @@ target_include_directories(${PROGRAM_NAME} PRIVATE
   ${CMAKE_CURRENT_LIST_DIR}
 
   #ATECC Libraries
-  ${CMAKE_CURRENT_LIST_DIR}/../include/cryptoauthlib/lib
-  ${CMAKE_CURRENT_LIST_DIR}/../include/cryptoauthlib/lib/hal
-  ${CMAKE_CURRENT_LIST_DIR}/../include/cryptoauthlib/lib/calib
-  ${CMAKE_CURRENT_LIST_DIR}/../include/cryptoauthlib/lib/crypto
-  ${CMAKE_CURRENT_LIST_DIR}/../include/cryptoauthlib/lib/atcacert
-  ${CMAKE_CURRENT_LIST_DIR}/../include/cryptoauthlib/lib/mbedtls
+  ${CMAKE_CURRENT_LIST_DIR}/../lib/cryptoauthlib/lib
+  ${CMAKE_CURRENT_LIST_DIR}/../lib/cryptoauthlib/lib/hal
+  ${CMAKE_CURRENT_LIST_DIR}/../lib/cryptoauthlib/lib/calib
+  ${CMAKE_CURRENT_LIST_DIR}/../lib/cryptoauthlib/lib/crypto
+  ${CMAKE_CURRENT_LIST_DIR}/../lib/cryptoauthlib/lib/atcacert
+  ${CMAKE_CURRENT_LIST_DIR}/../lib/cryptoauthlib/lib/mbedtls
 )
 
 # https://datasheets.raspberrypi.com/pico/raspberry-pi-pico-c-sdk.pdf
