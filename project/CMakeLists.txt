@@ -28,39 +28,49 @@ project(${PROGRAM_NAME})
 pico_sdk_init()
 
 add_subdirectory(../src build)
-add_subdirectory(../include/cryptoauthlib/lib build_cryptoauth) # ← atecc
+add_subdirectory(../include/cryptoauthlib/lib build_cryptoauth) 
 
 add_executable(${PROGRAM_NAME}
-  hw_config.c
-  main.c
-  msc_disk.c
-  usb_descriptors.c
-  hal_pico_i2c.c #atecc
+    hw_config.c
+    main.c
+    #TinyUSB Libraries
+    msc_disk.c
+    usb_descriptors.c
+    #ATECC Libraries
+    hal_pico_i2c.c 
+    ../include/cryptoauthlib/lib/mbedtls/atca_mbedtls_wrap.c
 )
+
 target_link_libraries(${PROGRAM_NAME} PRIVATE
     no-OS-FatFS-SD-SDIO-SPI-RPi-Pico
     pico_stdlib
     pico_unique_id
+    #TinyUSB Libraries
     tinyusb_additions
     tinyusb_board
     tinyusb_device
+    #Wifi Libraries
     pico_cyw43_arch_lwip_threadsafe_background
     pico_multicore
+    #HTTPS Libraries
     pico_lwip_mbedtls
     pico_mbedtls
-    hardware_i2c            # ← atecc
-    cryptoauth              # ← atecc
+    #ATECC Libraries
+    hardware_i2c
+    cryptoauth
 )
 
 target_include_directories(${PROGRAM_NAME} PRIVATE
   ${CMAKE_CURRENT_LIST_DIR}/header
-  ${CMAKE_CURRENT_LIST_DIR} 
-  
-  ${CMAKE_CURRENT_LIST_DIR}/../include/cryptoauthlib/lib            # ← atecc
-  ${CMAKE_CURRENT_LIST_DIR}/../include/cryptoauthlib/lib/hal        # ← atecc
-  ${CMAKE_CURRENT_LIST_DIR}/../include/cryptoauthlib/lib/calib      # ← atecc
-  ${CMAKE_CURRENT_LIST_DIR}/../include/cryptoauthlib/lib/crypto     # ← atecc
-  ${CMAKE_CURRENT_LIST_DIR}/../include/cryptoauthlib/lib/atcacert   # ← atecc
+  ${CMAKE_CURRENT_LIST_DIR}
+
+  #ATECC Libraries
+  ${CMAKE_CURRENT_LIST_DIR}/../include/cryptoauthlib/lib
+  ${CMAKE_CURRENT_LIST_DIR}/../include/cryptoauthlib/lib/hal
+  ${CMAKE_CURRENT_LIST_DIR}/../include/cryptoauthlib/lib/calib
+  ${CMAKE_CURRENT_LIST_DIR}/../include/cryptoauthlib/lib/crypto
+  ${CMAKE_CURRENT_LIST_DIR}/../include/cryptoauthlib/lib/atcacert
+  ${CMAKE_CURRENT_LIST_DIR}/../include/cryptoauthlib/lib/mbedtls
 )
 
 # https://datasheets.raspberrypi.com/pico/raspberry-pi-pico-c-sdk.pdf
