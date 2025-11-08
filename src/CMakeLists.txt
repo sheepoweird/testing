@@ -36,6 +36,7 @@ add_executable(${PROGRAM_NAME}
     #TinyUSB logic
     msc_disk.c
     usb_descriptors.c
+    hid_manager.c
     #WiFi logic
     wifi_manager.c
     #POST logic
