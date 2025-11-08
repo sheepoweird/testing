@@ -1,3 +1,4 @@
+// Libraries
 #include <pico/stdlib.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -6,7 +7,6 @@
 #include <bsp/board.h>
 #include <tusb.h>
 #include "hardware/gpio.h"
-#include "hid_config.h"
 
 #include "pico/cyw43_arch.h"
 #include "pico/multicore.h"
@@ -20,7 +20,6 @@
 #include "lwip/prot/iana.h"
 #include "lwip/dns.h"
 #include "mbedtls/ssl.h"
-#include "https_config.h"
 
 #include "hardware/i2c.h"
 #include "cryptoauthlib.h"
@@ -31,6 +30,11 @@
 #include "mbedtls/pk.h"
 #include "mbedtls/x509_crt.h"
 #include <mbedtls/debug.h>
+
+// Headers
+#include "hid_config.h"
+#include "https_config.h"
+#include "wifi.h"
 
 #define MBEDTLS_ECDSA_SIGN_ALT
 
@@ -149,13 +153,6 @@ static uint32_t last_post_time = 0;
 static volatile bool wifi_fully_connected = false;
 static bool usb_mounted = false;
 static bool auto_trigger_executed = false;
-
-// WiFi state
-static bool wifi_connected = false;
-static bool reconnect_pending = false;
-static uint32_t last_wifi_check = 0;
-static uint32_t wifi_disconnect_time = 0;
-static bool cyw43_initialized = false;
 
 // HID sequence
 static key_action_t sequence[MAX_SEQ];
@@ -986,129 +983,56 @@ void debug_pk_context(const char* label, mbedtls_pk_context* pk) {
 
 // [------------------------------------------------------------------------- Core 1 - WiFi Handler -------------------------------------------------------------------------]
 
-bool try_wifi_connect(void)
-{
-    printf("Core 1: Connecting to '%s'...\n", WIFI_SSID);
-
-    int link_status = cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA);
-    printf("connect status: ");
-    if (link_status == CYW43_LINK_DOWN) printf("no ip\n");
-    else if (link_status == CYW43_LINK_JOIN) printf("wifi joined\n");
-    else if (link_status == CYW43_LINK_NOIP) printf("no ip\n");
-    else if (link_status == CYW43_LINK_UP) printf("link up\n");
-    else if (link_status == CYW43_LINK_FAIL) printf("failed\n");
-    else if (link_status == CYW43_LINK_NONET) printf("no net\n");
-    else if (link_status == CYW43_LINK_BADAUTH) printf("bad auth\n");
-    else printf("unknown\n");
-
-    int connect_result = cyw43_arch_wifi_connect_timeout_ms(
-        WIFI_SSID, WIFI_PASSWORD,
-        CYW43_AUTH_WPA2_AES_PSK, 30000);
-
-    if (connect_result != 0)
-    {
-        printf("WiFi: Connection FAILED (error %d)\n", connect_result);
-        wifi_connected = false;
-        return false;
-    }
-
-    printf("WiFi: Connected successfully!\n");
-
-    uint32_t ip = cyw43_state.netif[0].ip_addr.addr;
-    printf("WiFi: IP Address: %lu.%lu.%lu.%lu\n",
-           ip & 0xFF, (ip >> 8) & 0xFF, (ip >> 16) & 0xFF, (ip >> 24) & 0xFF);
-
-    wifi_connected = true;
-    return true;
-}
-
+/**
+ * @brief Initialize WiFi using wifi_manager module
+ * 
+ * @return true if WiFi initialization and connection successful
+ */
 bool init_wifi(void)
 {
-    printf("Core 1: Initializing WiFi...\n");
-
-    if (cyw43_initialized)
+    printf("\n=== Initializing WiFi ===\n");
+    
+    /* Initialize WiFi manager */
+    if (!wifi_manager_init())
     {
-        printf("Core 1: Deinitializing previous WiFi instance...\n");
-        cyw43_arch_deinit();
-        cyw43_initialized = false;
-        sleep_ms(1000);
-    }
-
-    if (cyw43_arch_init())
-    {
-        printf("Core 1: WiFi init FAILED\n");
+        printf("WiFi Manager: Initialization failed!\n");
         return false;
     }
-
-    cyw43_initialized = true;
-    cyw43_arch_enable_sta_mode();
-    printf("Core 1: WiFi STA mode enabled\n");
-
-    if (!try_wifi_connect())
+    
+    /* Connect to WiFi network */
+    if (!wifi_manager_connect(WIFI_SSID, WIFI_PASSWORD, 30000))
     {
-        printf("Core 1: Initial WiFi connection FAILED\n");
-        cyw43_arch_deinit();
-        cyw43_initialized = false;
+        printf("WiFi Manager: Connection failed!\n");
         return false;
     }
-
-    printf("*** WIFI FULLY CONNECTED ***\n");
-    wifi_fully_connected = true;
-
+    
+    /* Update legacy flag for compatibility */
+    wifi_fully_connected = wifi_manager_is_fully_connected();
+    
+    printf("*** WiFi Manager: FULLY CONNECTED ***\n");
     return true;
 }
 
+/**
+ * @brief Check WiFi connection status and handle reconnection
+ * 
+ * This function monitors the WiFi connection and triggers automatic
+ * reconnection if the connection is lost.
+ */
 void check_wifi_connection(void)
 {
-    uint32_t now = to_ms_since_boot(get_absolute_time());
-
-    if (!cyw43_initialized)
-        return;
-
-    if (now - last_wifi_check < 5000)
-        return;
-
-    last_wifi_check = now;
-
-    int link_status = cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA);
-
-    if (link_status != CYW43_LINK_UP)
+    /* Check WiFi status */
+    wifi_status_t status = wifi_manager_check_status();
+    
+    /* Handle reconnection if needed */
+    const wifi_manager_state_t *state = wifi_manager_get_state();
+    if (status == WIFI_STATUS_DISCONNECTED && state->reconnect_pending)
     {
-        if (wifi_connected)
-        {
-            printf("\nCore 1: WiFi connection lost!\n");
-            wifi_connected = false;
-            wifi_fully_connected = false;
-            wifi_disconnect_time = now;
-            reconnect_pending = true;
-        }
-        else if (reconnect_pending && (now - wifi_disconnect_time >= WIFI_RECONNECT_DELAY_MS))
-        {
-            printf("Core 1: Attempting reconnection...\n");
-            reconnect_pending = false;
-            
-            if (try_wifi_connect())
-            {
-                printf("Core 1: WiFi reconnected successfully!\n");
-            }
-            else
-            {
-                wifi_disconnect_time = now;
-                reconnect_pending = true;
-                printf("Core 1: Reconnection failed, will retry...\n");
-            }
-        }
+        wifi_manager_handle_reconnect();
     }
-    else
-    {
-        if (!wifi_connected)
-        {
-            wifi_connected = true;
-            wifi_fully_connected = true;
-            reconnect_pending = false;
-            printf("Core 1: WiFi link restored!\n");
-        }
-    }
+    
+    /* Update legacy flags for compatibility with existing code */
+    wifi_fully_connected = wifi_manager_is_fully_connected();
 }
 
 void core1_entry(void)
@@ -1159,16 +1083,18 @@ void core1_entry(void)
     // Core 1 main loop
     while (true)
     {
-        cyw43_arch_poll();
+        wifi_manager_poll();
         check_wifi_connection();
         
         // LED behavior based on connection state
-        if (wifi_connected)
+        const wifi_manager_state_t *wifi_state = wifi_manager_get_state();
+        
+        if (wifi_manager_is_connected())
         {
             // Solid ON when connected
             gpio_put(WIFI_LED_PIN, 1);
         }
-        else if (reconnect_pending)
+        else if (wifi_state->reconnect_pending)
         {
             // Slow blink while waiting to reconnect
             uint32_t now = to_ms_since_boot(get_absolute_time());
@@ -1182,7 +1108,7 @@ void core1_entry(void)
         }
         
         // Handle webhook trigger
-        if (webhook_trigger && wifi_connected && !webhook_in_progress)
+        if (webhook_trigger && wifi_manager_is_connected() && !webhook_in_progress)
         {
             webhook_trigger = false;
             send_webhook_post(&current_health);
