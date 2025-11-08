@@ -339,15 +339,14 @@ void process_json_data(char *json)
 
 void tud_mount_cb(void) 
 {
-    sleep_ms(5000);
     usb_mounted = true;
-    sleep_ms(5000);
     printf("*** USB MOUNTED ***\n");
 }
 
 void tud_umount_cb(void) 
 {
     usb_mounted = false;
+    printf("*** USB UNMOUNTED ***\n");
 }
 
 void tud_suspend_cb(bool remote_wakeup_en) { 
@@ -514,8 +513,7 @@ void debug_pk_context(const char* label, mbedtls_pk_context* pk) {
 
 /**
  * @brief Initialize WiFi using wifi_manager module
- * 
- * @return true if WiFi initialization and connection successful
+ * * @return true if WiFi initialization and connection successful
  */
 bool init_wifi(void)
 {
@@ -554,7 +552,8 @@ void check_wifi_connection(void)
         wifi_manager_handle_reconnect();
     }
     
-    wifi_fully_connected = wifi_manager_is_fully_connected();
+    // This is less reliable here, moved to core1_entry loop for continuous update
+    // wifi_fully_connected = wifi_manager_is_fully_connected();
 }
 
 void core1_entry(void)
@@ -597,14 +596,37 @@ void core1_entry(void)
                 continue; // Retry after deinit
             }
 
+            // Wait for full connection on Core 1 before breaking the connection loop
+            uint32_t start_time = to_ms_since_boot(get_absolute_time());
+            const uint32_t max_wait = 10000; // 10 second timeout for DHCP
+            
+            while (wifi_manager_is_connected() && !wifi_manager_is_fully_connected())
+            {
+                wifi_manager_poll();
+                sleep_ms(100);
+                if (to_ms_since_boot(get_absolute_time()) - start_time > max_wait) {
+                    printf("Core 1: Timed out waiting for full IP connection (DHCP). Retrying...\n");
+                    break;
+                }
+            }
+            
+            if (!wifi_manager_is_fully_connected()) {
+                 attempt_count++;
+                 continue; // Restart the entire connection process
+            }
+
             // Exit the inner connection loop
-            printf("Core 1: WiFi connected after %d attempts!\n", attempt_count + 1);
-            wifi_fully_connected = wifi_manager_is_fully_connected();
+            printf("Core 1: WiFi fully connected after %d attempts!\n", attempt_count + 1);
+            wifi_fully_connected = true; // Set flag to true as we are now fully connected
             break; 
         }
 
         while (wifi_manager_is_connected()) 
         {
+            // NEW FIX: Continuously update the flag, although it should be true here, 
+            // a check ensures Core 0 gets the most recent state.
+            wifi_fully_connected = wifi_manager_is_fully_connected(); 
+            
             wifi_manager_check_status(); 
             wifi_manager_poll();
             
@@ -616,6 +638,10 @@ void core1_entry(void)
             
             sleep_ms(50);
         }
+        
+        // Connection dropped, ensure flag is false before retrying
+        wifi_fully_connected = false;
+        printf("Core 1: WiFi connection lost. Retrying...\n");
     }
 }
 
@@ -691,6 +717,10 @@ int main(void)
     {
         printf("HID Manager initialization failed\n");
     }
+    
+    // Build the sequence once at startup
+    hid_manager_build_sequence();
+
 
     // Launch WiFi on Core 1
     multicore_launch_core1(core1_entry);
@@ -730,6 +760,15 @@ int main(void)
         tud_task();
         hid_manager_task(wifi_fully_connected, usb_mounted);
         check_atecc_button();
+
+        // Periodic debug print for state monitoring
+        static uint32_t last_debug_print = 0;
+        uint32_t now = to_ms_since_boot(get_absolute_time());
+        if (now - last_debug_print > 1000) {
+            printf("DEBUG: Core 0 status: WiFi=%d (Fully Connected), USB=%d (Mounted), HID_status=%d\n",
+                   wifi_fully_connected, usb_mounted, hid_manager_get_status());
+            last_debug_print = now;
+        }
 
         int c = getchar_timeout_us(0);
 

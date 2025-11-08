@@ -7,6 +7,7 @@
 #define WIFI_RECONNECT_DELAY_MS     5000   /**< Delay before reconnection attempt */
 #define WIFI_CHECK_INTERVAL_MS      5000   /**< Interval for WiFi status check */
 #define WIFI_CONNECT_TIMEOUT_MS     30000  /**< Timeout for WiFi connection */
+#define WIFI_POLL_INTERVAL_MS       1      /**< Minimal delay for non-blocking poll */
 
 typedef enum
 {

@@ -152,6 +152,7 @@ bool hid_manager_start_sequence(void)
     
     if (g_hid_state.sequence_length == 0)
     {
+        // This should not happen if called after hid_manager_build_sequence in main
         printf("HID Manager: ERROR - No sequence built\n");
         return false;
     }
@@ -322,7 +323,8 @@ static void hid_check_manual_trigger(void)
             printf("\n>>> GP%u Button Pressed! Starting HID sequence... <<<\n",
                    g_hid_config.trigger_button_pin);
             
-            hid_manager_build_sequence();
+            // Sequence should already be built from main.c
+            // hid_manager_build_sequence(); 
             hid_manager_start_sequence();
             
             debounce_time = now;
@@ -340,16 +342,24 @@ static void hid_check_auto_trigger(bool wifi_connected, bool usb_mounted)
     /* Both WiFi and USB must be ready */
     if (!wifi_connected || !usb_mounted)
     {
+        // Reset countdown if conditions are no longer met
         g_hid_state.auto_trigger_start_time = 0;
+        g_hid_state.status = HID_STATUS_WAITING_TRIGGER;
         return;
     }
     
-    /* Start countdown timer */
-    if (g_hid_state.auto_trigger_start_time == 0)
+    /* Start countdown timer only if not started yet and not running/complete */
+    if (g_hid_state.auto_trigger_start_time == 0 && 
+        g_hid_state.status == HID_STATUS_WAITING_TRIGGER)
     {
         g_hid_state.auto_trigger_start_time = to_ms_since_boot(get_absolute_time());
         printf("\n*** WIFI + USB READY - %lu second countdown started ***\n",
                g_hid_config.auto_trigger_delay_ms / 1000);
+        return;
+    }
+    
+    // Only proceed if countdown has started
+    if (g_hid_state.auto_trigger_start_time == 0) {
         return;
     }
     
@@ -361,10 +371,12 @@ static void hid_check_auto_trigger(bool wifi_connected, bool usb_mounted)
     {
         printf("*** AUTO-TRIGGERING HID SEQUENCE ***\n");
         
-        hid_manager_build_sequence();
+        // Sequence should already be built from main.c
+        // hid_manager_build_sequence(); 
         hid_manager_start_sequence();
         
         g_hid_state.auto_trigger_executed = true;
+        g_hid_state.status = HID_STATUS_RUNNING; // Status is set in start_sequence, but for clarity
     }
 }
 

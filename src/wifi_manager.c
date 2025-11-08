@@ -2,6 +2,9 @@
 #include "pico/stdlib.h"
 #include "pico/cyw43_arch.h"
 #include "lwip/dns.h"
+#include "lwip/init.h"
+#include "lwip/netif.h"
+#include "lwip/ip4_addr.h"
 #include "hardware/gpio.h"
 #include <stdio.h>
 #include <string.h>
@@ -13,6 +16,8 @@ static wifi_manager_state_t g_wifi_state = {0};
 static char g_ssid[64] = {0};
 static char g_password[64] = {0};
 static bool wifi_wait_for_connection(uint32_t timeout_ms);
+static void wifi_check_full_connection(void);
+
 
 bool wifi_manager_init(void)
 {
@@ -93,7 +98,7 @@ bool wifi_manager_connect(const char *ssid, const char *password, uint32_t timeo
         return false;
     }
 
-    /* Wait for link to stabilize */
+    /* Wait for link to stabilize (only link up, DHCP is separate) */
     if (!wifi_wait_for_connection(5000))
     {
         printf("WiFi Manager: Link stabilization failed!\n");
@@ -241,12 +246,43 @@ void wifi_manager_deinit(void)
     }
 }
 
+
+/**
+ * @brief Checks if the network interface has a valid IP address assigned.
+ * This is the definition of "fully connected" (link up + DHCP complete).
+ */
+static void wifi_check_full_connection(void)
+{
+    // Check if the link is up
+    if (cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA) == CYW43_LINK_UP)
+    {
+        // FIX 1: Replaced '->' with '.' to resolve "operator applied to struct" error.
+        if (cyw43_state.netif[CYW43_ITF_STA].ip_addr.addr != 0) 
+        {
+            if (!g_wifi_state.is_fully_connected) {
+                printf("WiFi Manager: IP address assigned: %s\n", 
+                       // FIX 2: Added '&' to pass a pointer to netif_ip4_addr().
+                       ip4addr_ntoa(netif_ip4_addr(&cyw43_state.netif[CYW43_ITF_STA]))); 
+            }
+            g_wifi_state.is_fully_connected = true;
+            return;
+        }
+    }
+    
+    g_wifi_state.is_fully_connected = false;
+}
+
 // Polling WiFi
 void wifi_manager_poll(void)
 {
     if (g_wifi_state.is_initialized)
     {
         cyw43_arch_poll();
+        
+        // Only check for full connection status if the link is up
+        if (g_wifi_state.is_connected) {
+            wifi_check_full_connection();
+        }
     }
 }
 
@@ -256,6 +292,9 @@ static bool wifi_wait_for_connection(uint32_t timeout_ms)
     
     while ((to_ms_since_boot(get_absolute_time()) - start) < timeout_ms)
     {
+        // Poll arch continuously to process link status updates
+        cyw43_arch_poll(); 
+
         int status = cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA);
         
         if (status == CYW43_LINK_UP)
@@ -263,7 +302,8 @@ static bool wifi_wait_for_connection(uint32_t timeout_ms)
             return true;
         }
         
-        sleep_ms(100);
+        // Use minimal sleep to avoid blocking network events
+        sleep_ms(WIFI_POLL_INTERVAL_MS);
     }
     
     return false;
