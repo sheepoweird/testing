@@ -34,10 +34,8 @@
 // Headers
 #include "hid_config.h"
 #include "https_config.h"
-#include "wifi.h"
-
-#define MBEDTLS_ECDSA_SIGN_ALT
-
+#include "wifi_manager.h"
+#include "https_client.h"
 
 
 #define HID_BUTTON_PIN 20
@@ -53,6 +51,8 @@
 #define I2C_SCL_PIN     5
 #define I2C_BAUDRATE    100000
 
+#define MBEDTLS_ECDSA_SIGN_ALT
+
 #define TARGET_SLOT 0
 #define ECC_PUB_KEY_SIZE    64
 #define ECC_SIGNATURE_SIZE  64
@@ -63,17 +63,16 @@
 #define MAX_SEQ 512
 
 #define DATA_TIMEOUT_MS 20000
-#define WIFI_RECONNECT_DELAY_MS 5000
 
 // MTLS CONFIGURATION
-#define MTLS_ENABLED
+// #define MTLS_ENABLED
 
 // POST CONFIGURATION
 #define AUTO_POST_ON_SAMPLE
 #define MIN_POST_INTERVAL_MS 6000
 
 // AUTO-HID TRIGGER CONFIGURATION
-#define AUTO_TRIGGER_HID
+// #define AUTO_TRIGGER_HID
 
 typedef struct
 {
@@ -159,8 +158,8 @@ static key_action_t sequence[MAX_SEQ];
 static int seq_len = 0;
 
 //mtls state
-static bool g_atecc_pk_initialized = false;
-static mbedtls_pk_context g_atecc_pk_ctx;
+bool g_atecc_pk_initialized = false;
+mbedtls_pk_context g_atecc_pk_ctx;
 bool init_atecc_pk_context(void);
 
 
@@ -513,455 +512,141 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t rep
     (void)itf; (void)report_id; (void)report_type; (void)buffer; (void)bufsize;
 }
 
-// =============================================================================
-// HTTPS CALLBACK FUNCTIONS
-// =============================================================================
-
-void dns_callback(const char* name, const ip_addr_t* ipaddr, void* arg)
-{
-    if (ipaddr) {
-        ip_addr_t* result = (ip_addr_t*)arg;
-        *result = *ipaddr;
-        gpio_put(DNS_LED_PIN, 1);
-        printf("DNS resolved: %s\n", ip4addr_ntoa(ipaddr));
-    } else {
-        gpio_put(DNS_LED_PIN, 0);
-        printf("DNS resolution failed\n");
-    }
-}
-
-err_t https_connected_callback(void* arg, struct altcp_pcb* tpcb, err_t err)
-{
-    https_state_t* state = (https_state_t*)arg;
-    
-    if (err == ERR_OK) {
-        state->connected = true;
-        gpio_put(MTLS_LED_PIN, 1);
-        printf("TLS handshake complete!\n");
-    } else {
-        gpio_put(MTLS_LED_PIN, 0);
-        printf("Connection failed: %d\n", err);
-    }
-    
-    return ERR_OK;
-}
-
-err_t https_recv_callback(void* arg, struct altcp_pcb* tpcb, struct pbuf* p, err_t err)
-{
-    https_state_t* state = (https_state_t*)arg;
-    
-    if (p == NULL) {
-        altcp_close(tpcb);
-        state->pcb=NULL;
-        state->connected=false;
-        state->operation_in_progress=false;
-        webhook_in_progress=false;
-        printf("Connection closed by server\n");
-        return ERR_OK;
-    }
-    
-    state->bytes_received += p->tot_len;
-    
-    altcp_recved(tpcb, p->tot_len);
-    altcp_close(tpcb);
-    pbuf_free(p);
-    if (https_state.pcb != NULL) {
-        altcp_close(https_state.pcb);
-        https_state.pcb = NULL;
-    }
-    if (https_state.tls_config != NULL) {
-        altcp_tls_free_config(https_state.tls_config);
-        https_state.tls_config = NULL;
-    }
-    return ERR_OK;
-}
-
-void https_err_callback(void* arg, err_t err)
-{
-    printf("Connection error: %d\n", err);
-    https_state_t* state = (https_state_t*)arg;
-    state->connected = false;
-    gpio_put(MTLS_LED_PIN, 0);
-}
-
 // [------------------------------------------------------------------------- HTTPS -------------------------------------------------------------------------]
-
-int atca_mbedtls_ecdsa_sign(const mbedtls_mpi* data, mbedtls_mpi* r, mbedtls_mpi* s,
-                            const unsigned char* msg, size_t msg_len)
-{
-    (void)data;  // Unused — ATECC uses slot instead
-
-    if (!msg || msg_len != 32 || !r || !s) {
-        return MBEDTLS_ERR_ECP_BAD_INPUT_DATA;
-    }
-
-    printf("📝 ATECC hardware signing called (slot %d)\n", TARGET_SLOT);
-
-    uint8_t signature[64];
-    ATCA_STATUS status = atcab_sign(TARGET_SLOT, msg, signature);
-
-    if (status != ATCA_SUCCESS) {
-        printf("❌ ATECC sign failed: 0x%02X\n", status);
-        return MBEDTLS_ERR_PK_ALLOC_FAILED;
-    }
-
-    printf("✅ ATECC signature generated\n");
-
-    int ret = mbedtls_mpi_read_binary(r, signature, 32);
-    if (ret != 0) {
-        printf("❌ Failed to read R: -0x%04x\n", -ret);
-        return ret;
-    }
-
-    ret = mbedtls_mpi_read_binary(s, signature + 32, 32);
-    if (ret != 0) {
-        printf("❌ Failed to read S: -0x%04x\n", -ret);
-        return ret;
-    }
-    return ret;
-}
-
-int mbedtls_ecdsa_sign(mbedtls_ecp_group *grp, 
-                        mbedtls_mpi *r, 
-                        mbedtls_mpi *s,
-                        const mbedtls_mpi *d, 
-                        const unsigned char *buf, 
-                        size_t blen,
-                        int (*f_rng)(void *, unsigned char *, size_t), 
-                        void *p_rng) {
-        fflush(stdout);
-        ATCA_STATUS status;
-        printf("🚨🚨🚨 MBEDTLS_ECDSA_SIGN CALLED! 🚨🚨🚨\n");
-        printf("bettter be called");
-        printf("Buffer length: %zu\n", blen);
-        
-        // Convert the MPI hash to a 32-byte buffer for ATECC
-        uint8_t hash[32];
-        status = atcab_random(hash);///hello
-        if (blen != 32) {
-            printf("❌ Expected 32-byte hash, got %zu\n", blen);
-            return MBEDTLS_ERR_ECP_BAD_INPUT_DATA;
-        }
-        memcpy(hash, buf, 32);
-        
-        // Call ATECC hardware to sign
-        uint8_t signature[64];
-        status = atcab_sign(TARGET_SLOT, hash, signature);
-        
-        if (status != ATCA_SUCCESS) {
-            printf("❌ ATECC sign failed: 0x%02X\n", status);
-        }
-        
-        // Convert ATECC signature (R||S) to mbedTLS MPIs
-        int ret = mbedtls_mpi_read_binary(r, signature, 32);
-        if (ret != 0) {
-            printf("❌ Failed to read R: -0x%04x\n", -ret);
-            return ret;
-        }
-        
-        ret = mbedtls_mpi_read_binary(s, signature + 32, 32);
-        if (ret != 0) {
-            printf("❌ Failed to read S: -0x%04x\n", -ret);
-            return ret;
-        }
-        
-    printf("✅ ATECC signature successful!\n");
-    return 0;
-}
-
-
 
 void send_webhook_post(health_data_t* data)
 {
-    if (https_state.operation_in_progress) {
-        printf("Operation already in progress, skipping\n");
+    if (https_client_is_busy())
+    {
+        printf("HTTPS: Operation already in progress, skipping\n");
         return;
     }
-
-    webhook_in_progress = true;
-    https_state.operation_in_progress = true;
-    https_state.operation_start_time = to_ms_since_boot(get_absolute_time());
     
-    https_state.pending_data = *data;
+    webhook_in_progress = true;
     
     printf("POST[%lu]...\n", sample_count);
     fflush(stdout);
-
-    // Reset LEDs at start of POST
-    gpio_put(DNS_LED_PIN, 0);
-    gpio_put(MTLS_LED_PIN, 0);
-
-    // Step 1: DNS Resolution
-    ip_addr_t server_ip = {0};
-    printf("\nResolving %s...\n", WEBHOOK_HOSTNAME);
     
-    err_t dns_err = dns_gethostbyname(WEBHOOK_HOSTNAME, &server_ip, dns_callback, &server_ip);
-    
-    if (dns_err == ERR_INPROGRESS) {
-        int timeout = 0;
-        while (server_ip.addr == 0 && timeout < 100) {
-            cyw43_arch_poll();
-            sleep_ms(100);
-            timeout++;
-        }
-    }
-
-    if (server_ip.addr == 0) {
-        printf("DNS fail\n");
-        gpio_put(DNS_LED_PIN, 0);
-        https_state.operation_in_progress = false;
-        webhook_in_progress = false;
-        return;
-    }
-
-    gpio_put(DNS_LED_PIN, 1);
-    printf("Resolved to: %s\n", ip4addr_ntoa(&server_ip));
-
-    // Step 2: Create TLS Config
-    u8_t ca_cert[] = CA_CERT;
-    
-#ifdef MTLS_ENABLED
-    u8_t client_cert[] = CLIENT_CERT;
-    https_state.tls_config = altcp_tls_create_config_client_2wayauth(
-        ca_cert, sizeof(ca_cert),
-    // client_key, sizeof(client_key), //modify library to check for (!cert) only reomve &&!privkey portion
-        NULL, 0,
-        NULL, 0,
-        client_cert, sizeof(client_cert)
-    );
-#else
-    https_state.tls_config = altcp_tls_create_config_client(
-        ca_cert, sizeof(ca_cert)
-    );
-#endif
-    //Integrating ATECC, injection start===============
-
-    if (https_state.tls_config && g_atecc_pk_initialized){
-        altcp_tls_config_internal_t* cfg_internal = 
-            (altcp_tls_config_internal_t*)https_state.tls_config;
-        if (cfg_internal != NULL){
-            mbedtls_ssl_conf_dbg(&cfg_internal->conf, mbedtls_debug, NULL);
-            mbedtls_ssl_conf_authmode(&cfg_internal->conf, MBEDTLS_SSL_VERIFY_REQUIRED);
-            
-            //Allocate Client cert chain
-            if(cfg_internal->cert_chain == NULL){
-                cfg_internal->cert_chain = (mbedtls_x509_crt *)malloc(sizeof(mbedtls_x509_crt));
-                if(cfg_internal->cert_chain == NULL){
-                    printf("config error: failed to allocatememory for cleint cert chain\n");
-                    return;
-                }
-                printf("memory allocated for cert chain\n");
-            }
-            mbedtls_x509_crt_init(cfg_internal->cert_chain);
-            u8_t client_cert_safe[] = CLIENT_CERT "\0";
-            size_t cert_len_plus_null = strlen((const char *)client_cert_safe) +1;
-            int ret = mbedtls_x509_crt_parse(cfg_internal->cert_chain, client_cert_safe, cert_len_plus_null);
-            // After mbedtls_ssl_conf_own_cert:
-            printf("mbedtls_ssl_conf_own_cert returned: %d\n", ret);
-            if (ret != 0) {
-                    printf("❌ Failed to parse client certificate: %d\n", ret);
-                    free(cfg_internal->cert_chain);
-                    cfg_internal->cert_chain = NULL;
-                    return;
-                }
-                
-                // Make sure ATECC PK context is initiated
-                if(!init_atecc_pk_context()){
-                    printf("❌ Failed to initialize ATECC PK context.\n");
-                    return;
-                }
-                printf("PK info: %s\n", mbedtls_pk_get_name(&g_atecc_pk_ctx));
-            printf("PK can sign? %d\n", mbedtls_pk_can_do(&g_atecc_pk_ctx, MBEDTLS_PK_ECKEY));
-
-                cfg_internal->pkey = &g_atecc_pk_ctx; // Inject ATECC PK context
-                uint8_t test_hash[32] = {0xAA}; // Simple pattern
-                uint8_t test_sig[64];
-                size_t test_sig_len = 0;
-                ret = mbedtls_ssl_conf_own_cert(&cfg_internal->conf, 
-                                        cfg_internal->cert_chain, 
-                                        &g_atecc_pk_ctx);
-                printf("mbedtls_ssl_conf_own_cert returned: %d\n", ret);
-
-                if (ret == 0) {
-                    printf("✅ Successfully configured TLS to use &g_atecc_pk_ctx (points to ATECC chip)\n");
-                } else {
-                    printf("⚠️  ATECC injection failed: -0x%04x\n", -ret);
-                    printf("⚠️  Falling back to software key\n");
-                }
-        }else{
-            printf("atecc not available, using softwrae\n");
-        }
-        //injection end ======
-    }
-    // Step 3: Create new PCB
-    https_state.pcb = altcp_tls_new(https_state.tls_config, IPADDR_TYPE_V4);
-
-    if (!https_state.pcb) {
-        printf("PCB fail\n");
-        gpio_put(MTLS_LED_PIN, 0);
-        altcp_tls_free_config(https_state.tls_config);
-        https_state.tls_config = NULL;
-        https_state.operation_in_progress = false;
-        webhook_in_progress = false;
-        return;
-    }
-
-    // Step 4: Set SNI hostname
-    int mbedtls_err = mbedtls_ssl_set_hostname(
-        &(((altcp_mbedtls_state_t*)(https_state.pcb->state))->ssl_context),
-        WEBHOOK_HOSTNAME
-    );
-
-    if (mbedtls_err != 0) {
-        printf("SNI fail\n");
-        gpio_put(MTLS_LED_PIN, 0);
-        altcp_close(https_state.pcb);
-        altcp_tls_free_config(https_state.tls_config);
-        https_state.tls_config = NULL;
-        https_state.pcb = NULL;
-        https_state.operation_in_progress = false;
-        webhook_in_progress = false;
-        return;  
-    }
-
-    // Step 5: Set callbacks
-    https_state.connected = false;
-    https_state.request_sent = false;
-    https_state.bytes_received = 0;
-    
-    altcp_arg(https_state.pcb, &https_state);
-    altcp_err(https_state.pcb, https_err_callback);
-    altcp_recv(https_state.pcb, https_recv_callback);
-
-    printf("Connecting to %s:443...\n", WEBHOOK_HOSTNAME);
-    
-    // Step 6: Connect
-    err_t connect_err = altcp_connect(https_state.pcb, &server_ip, 443, https_connected_callback);
-
-    if (connect_err != ERR_OK) {
-        printf("Connect fail:%d\n", connect_err);
-        gpio_put(MTLS_LED_PIN, 0);
-        altcp_close(https_state.pcb);
-        altcp_tls_free_config(https_state.tls_config);
-        https_state.tls_config = NULL;
-        https_state.pcb = NULL;
-        https_state.operation_in_progress = false;
-        webhook_in_progress = false;
-        return;
-    }
-
-    // Step 7: Wait for TLS handshake
-    int timeout = 0;
-    while (!https_state.connected && timeout < 1000) {
-        cyw43_arch_poll();
-        sleep_ms(100);
-        timeout++;
-    }
-
-    if (!https_state.connected) {
-        printf("Timeout\n");
-        gpio_put(MTLS_LED_PIN, 0);
-        altcp_close(https_state.pcb);
-        altcp_tls_free_config(https_state.tls_config);
-        https_state.tls_config = NULL;
-        https_state.pcb = NULL;
-        https_state.operation_in_progress = false;
-        webhook_in_progress = false;
-        return;
-    }
-
-    // Step 8: Build and send request
-    char json_body[256];
+    /* Build JSON payload */
+    char json_body[HTTPS_MAX_JSON_BODY_SIZE];
     int body_len = snprintf(json_body, sizeof(json_body),
-                            "{\"sample\":%lu,\"timestamp\":%lu,\"device\":\"Pico-W\","
-                            "\"cpu\":%.1f,\"mem\":%.1f,\"disk\":%.1f,"
-                            "\"net_in\":%.1f,\"net_out\":%.1f,\"proc\":%d}",
-                            sample_count,
-                            to_ms_since_boot(get_absolute_time()),
-                            https_state.pending_data.cpu,
-                            https_state.pending_data.memory,
-                            https_state.pending_data.disk,
-                            https_state.pending_data.net_in,
-                            https_state.pending_data.net_out,
-                            https_state.pending_data.processes);
-
-    char request[2048];
-    int req_len = snprintf(request, sizeof(request),
-                           "POST /%s HTTP/1.1\r\n"
-                           "Host: %s\r\n"
-                           "Content-Type: application/json\r\n"
-                           "Content-Length: %d\r\n"
-                           "Connection: close\r\n"
-                           "\r\n"
-                           "%s",
-                           WEBHOOK_TOKEN, WEBHOOK_HOSTNAME, body_len, json_body);
-
-    printf("Sending request...\n");
-
-    // Make this reuse previous connection
-    err_t write_err = altcp_write(https_state.pcb, request, req_len, TCP_WRITE_FLAG_COPY);
-
-    if (write_err == ERR_OK) {
-        altcp_output(https_state.pcb);
-        https_state.request_sent = true;
-
-        // Wait for response (longer timeout)
-        for (int i = 0; i < 500; i++) {
-            cyw43_arch_poll();
-            sleep_ms(100);
-        }
-
-        printf("OK (%db)\n", https_state.bytes_received);
-        fflush(stdout);
-    } else {
-        printf("Write fail:%d\n", write_err);
-    }
-
-    // Step 9: CRITICAL - Proper cleanup in correct order
-    // Close the connection
-    if (https_state.pcb != NULL) {
-        altcp_close(https_state.pcb);
-        https_state.pcb = NULL;
+                           "{\"sample\":%lu,\"timestamp\":%lu,\"device\":\"Pico-W\","
+                           "\"cpu\":%.1f,\"mem\":%.1f,\"disk\":%.1f,"
+                           "\"net_in\":%.1f,\"net_out\":%.1f,\"proc\":%d}",
+                           sample_count,
+                           to_ms_since_boot(get_absolute_time()),
+                           data->cpu,
+                           data->memory,
+                           data->disk,
+                           data->net_in,
+                           data->net_out,
+                           data->processes);
+    
+    if (body_len < 0 || body_len >= (int)sizeof(json_body))
+    {
+        printf("JSON payload too large\n");
+        webhook_in_progress = false;
+        return;
     }
     
-    // Free TLS config
-    if (https_state.tls_config != NULL) {
-        altcp_tls_free_config(https_state.tls_config);
-        https_state.tls_config = NULL;
+    /* Build request path */
+    char path[128];
+    snprintf(path, sizeof(path), "/%s", WEBHOOK_TOKEN);
+    
+    /* Send HTTPS POST request */
+    bool success = https_client_post(path, json_body, body_len);
+    
+    if (success)
+    {
+        printf("POST complete: %u bytes received\n", 
+               https_client_get_bytes_received());
+    }
+    else
+    {
+        printf("POST failed\n");
     }
     
-    // Give lwIP time to clean up
-    for (int i = 0; i < 5; i++) {
-        cyw43_arch_poll();
-        sleep_ms(50);
-    }
-
-    https_state.operation_in_progress = false;
     webhook_in_progress = false;
 }
 
-bool init_atecc_pk_context(void){
-    if (!g_atecc_pk_initialized){
+bool init_atecc_pk_context(void)
+{
+    if (!g_atecc_pk_initialized)
+    {
         mbedtls_pk_init(&g_atecc_pk_ctx);
-        int ret = mbedtls_pk_setup(&g_atecc_pk_ctx, mbedtls_pk_info_from_type(MBEDTLS_PK_ECKEY));      
-        if (ret !=0){
-            printf("❌ mbedtls_pk_setup failed: -0x%04x\n", -ret);
+        
+        int ret = mbedtls_pk_setup(&g_atecc_pk_ctx, mbedtls_pk_info_from_type(MBEDTLS_PK_ECKEY));
+        
+        if (ret != 0)
+        {
+            printf("❌ Failed to setup ATECC PK context: -0x%04x\n", -ret);
             return false;
         }
+        
         g_atecc_pk_initialized = true;
-
-        printf("⚠️  We need to manually hook the signing function atca wrapper\n");
-        debug_pk_context("After init", &g_atecc_pk_ctx);
-
-        // Test signing directly with correct signature
-        uint8_t test_hash[32] = {0};
-        uint8_t test_sig[64];
-        size_t sig_len = 0;
-        int test_ret = mbedtls_pk_sign(&g_atecc_pk_ctx, MBEDTLS_MD_SHA256, 
-                                    test_hash, 32, test_sig, sizeof(test_sig), &sig_len, NULL, NULL);
-        printf("Direct PK sign test returned: %d, sig_len: %zu\n", test_ret, sig_len);
+        printf("✅ ATECC PK context initialized\n");
     }
+    
     return true;
+}
+
+int mbedtls_ecdsa_sign(mbedtls_ecp_group *grp, 
+                       mbedtls_mpi *r, 
+                       mbedtls_mpi *s,
+                       const mbedtls_mpi *d, 
+                       const unsigned char *buf, 
+                       size_t blen,
+                       int (*f_rng)(void *, unsigned char *, size_t), 
+                       void *p_rng) 
+{
+    (void)grp;    /* Unused - ATECC uses P-256 internally */
+    (void)d;      /* Unused - ATECC uses key from slot */
+    (void)f_rng;  /* Unused - ATECC has hardware RNG */
+    (void)p_rng;  /* Unused */
+    
+    ATCA_STATUS status;
+    
+    printf("🚨 MBEDTLS_ECDSA_SIGN: ATECC hardware signing called\n");
+    printf("   Buffer length: %zu bytes\n", blen);
+    
+    /* Verify hash length */
+    if (blen != 32) 
+    {
+        printf("❌ Expected 32-byte hash, got %zu bytes\n", blen);
+        return MBEDTLS_ERR_ECP_BAD_INPUT_DATA;
+    }
+    
+    /* Copy hash buffer */
+    uint8_t hash[32];
+    memcpy(hash, buf, 32);
+    
+    /* Call ATECC608B hardware to sign the hash */
+    uint8_t signature[64];
+    status = atcab_sign(TARGET_SLOT, hash, signature);
+    
+    if (status != ATCA_SUCCESS) 
+    {
+        printf("❌ ATECC sign failed: 0x%02X\n", status);
+        return MBEDTLS_ERR_PK_ALLOC_FAILED;
+    }
+    
+    /* Convert ATECC signature (R||S format) to mbedTLS MPIs */
+    int ret = mbedtls_mpi_read_binary(r, signature, 32);
+    if (ret != 0) 
+    {
+        printf("❌ Failed to read signature R component: -0x%04x\n", -ret);
+        return ret;
+    }
+    
+    ret = mbedtls_mpi_read_binary(s, signature + 32, 32);
+    if (ret != 0) 
+    {
+        printf("❌ Failed to read signature S component: -0x%04x\n", -ret);
+        return ret;
+    }
+    
+    printf("✅ ATECC hardware signature successful!\n");
+    return 0;
 }
 
 
@@ -1013,12 +698,6 @@ bool init_wifi(void)
     return true;
 }
 
-/**
- * @brief Check WiFi connection status and handle reconnection
- * 
- * This function monitors the WiFi connection and triggers automatic
- * reconnection if the connection is lost.
- */
 void check_wifi_connection(void)
 {
     /* Check WiFi status */
@@ -1031,90 +710,69 @@ void check_wifi_connection(void)
         wifi_manager_handle_reconnect();
     }
     
-    /* Update legacy flags for compatibility with existing code */
     wifi_fully_connected = wifi_manager_is_fully_connected();
 }
 
 void core1_entry(void)
 {
     printf("Core 1: Starting WiFi on separate core\n");
-
     sleep_ms(1000);
-
-    bool wifi_init_success = false;
-    int attempt_count = 0;
-
-    // Keep trying to connect indefinitely until successful
-    while (!wifi_init_success)
+    
+    while (true) 
     {
-        if (attempt_count > 0)
+        int attempt_count = 0;
+        
+        while (true)
         {
-            printf("Core 1: Retry attempt %d in %d seconds...\n", 
-                   attempt_count + 1, 
-                   WIFI_RECONNECT_DELAY_MS / 1000);
+            if (attempt_count > 0)
+            {
+                printf("Core 1: Retry attempt %d in %d seconds...\n", 
+                        attempt_count + 1, 
+                        WIFI_RECONNECT_DELAY_MS / 1000);
+                
+                // De-init the driver to reset it
+                wifi_manager_deinit(); 
+                sleep_ms(WIFI_RECONNECT_DELAY_MS);
+            }
+
+            printf("Core 1: Initializing WiFi hardware...\n");
+            if (!wifi_manager_init()) {
+                printf("Core 1: WiFi init FAILED\n");
+                attempt_count++;
+                continue; // Retry after delay
+            }
+
+            printf("Core 1: Connecting to WiFi network...\n");
+            if (!wifi_manager_connect(WIFI_SSID, WIFI_PASSWORD, WIFI_CONNECT_TIMEOUT_MS)) {
+                printf("Core 1: WiFi connection FAILED\n");
+                attempt_count++;
+                continue; // Retry after deinit
+            }
+
+            // Exit the inner connection loop
+            printf("Core 1: WiFi connected after %d attempts!\n", attempt_count + 1);
+            wifi_fully_connected = wifi_manager_is_fully_connected();
+            break; 
+        }
+
+        while (wifi_manager_is_connected()) 
+        {
+            wifi_manager_poll();
             
-            // Blink LED during wait period
-            int blink_cycles = WIFI_RECONNECT_DELAY_MS / 500;
-            for (int i = 0; i < blink_cycles; i++) {
-                gpio_put(WIFI_LED_PIN, 1);
-                sleep_ms(250);
-                gpio_put(WIFI_LED_PIN, 0);
-                sleep_ms(250);
+            if (!wifi_manager_is_connected())
+            {
+                printf("Core 1: Connection dropped. Restarting full reconnect sequence...\n");
+                break; 
             }
-        }
-
-        wifi_init_success = init_wifi();
-        attempt_count++;
-        
-        // Fast blink during connection attempt
-        if (!wifi_init_success) {
-            for (int i = 0; i < 5; i++) {
-                gpio_put(WIFI_LED_PIN, 1);
-                sleep_ms(100);
-                gpio_put(WIFI_LED_PIN, 0);
-                sleep_ms(100);
+            
+            if (webhook_trigger && !webhook_in_progress)
+            {
+                webhook_trigger = false;
+                send_webhook_post(&current_health);
             }
+            
+            sleep_ms(50);
         }
-    }
-
-    printf("Core 1: WiFi connected after %d attempts!\n", attempt_count);
-    gpio_put(WIFI_LED_PIN, 1);  // SOLID ON when connected
-
-    // Core 1 main loop
-    while (true)
-    {
-        wifi_manager_poll();
-        check_wifi_connection();
-        
-        // LED behavior based on connection state
-        const wifi_manager_state_t *wifi_state = wifi_manager_get_state();
-        
-        if (wifi_manager_is_connected())
-        {
-            // Solid ON when connected
-            gpio_put(WIFI_LED_PIN, 1);
-        }
-        else if (wifi_state->reconnect_pending)
-        {
-            // Slow blink while waiting to reconnect
-            uint32_t now = to_ms_since_boot(get_absolute_time());
-            gpio_put(WIFI_LED_PIN, ((now / 500) % 2) == 0);
-        }
-        else
-        {
-            // Fast blink during reconnection attempt
-            uint32_t now = to_ms_since_boot(get_absolute_time());
-            gpio_put(WIFI_LED_PIN, ((now / 100) % 2) == 0);
-        }
-        
-        // Handle webhook trigger
-        if (webhook_trigger && wifi_manager_is_connected() && !webhook_in_progress)
-        {
-            webhook_trigger = false;
-            send_webhook_post(&current_health);
-        }
-        
-        sleep_ms(50);
     }
 }
 
@@ -1131,10 +789,6 @@ int main(void)
     gpio_init(HID_BUTTON_PIN);
     gpio_set_dir(HID_BUTTON_PIN, GPIO_IN);
     gpio_pull_up(HID_BUTTON_PIN);
-
-    gpio_init(WIFI_LED_PIN);
-    gpio_set_dir(WIFI_LED_PIN, GPIO_OUT);
-    gpio_put(WIFI_LED_PIN, 0);
 
     gpio_init(DNS_LED_PIN);
     gpio_set_dir(DNS_LED_PIN, GPIO_OUT);
@@ -1180,6 +834,34 @@ int main(void)
     // Launch WiFi on Core 1
     multicore_launch_core1(core1_entry);
     sleep_ms(2000);
+
+    // Initialize HTTPS client
+    if (!https_client_init())
+    {
+        printf("HTTPS client initialization failed\n");
+    }
+    
+    // Configure HTTPS client with certificates
+    https_config_t https_cfg = {
+        .hostname = WEBHOOK_HOSTNAME,
+        .port = 443,
+        .ca_cert = (const uint8_t*)CA_CERT,
+        .ca_cert_len = sizeof(CA_CERT),
+    #ifdef MTLS_ENABLED
+        .client_cert = (const uint8_t*)CLIENT_CERT,
+        .client_cert_len = sizeof(CLIENT_CERT),
+        .enable_mtls = true,
+        .use_atecc = true,
+    #else
+        .client_cert = NULL,
+        .client_cert_len = 0,
+        .enable_mtls = false,
+        .use_atecc = false,
+    #endif
+    };
+    
+    https_client_configure(&https_cfg);
+
 
     // Core 0 main loop
     while (true)

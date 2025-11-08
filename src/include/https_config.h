@@ -3,7 +3,7 @@
 
 // Webhook.site configuration
 #define WEBHOOK_HOSTNAME "webhook.site"
-#define WEBHOOK_TOKEN "484a6490-f588-4225-b7c8-0bc0a99f5f01"
+#define WEBHOOK_TOKEN "25bed0eb-2a46-4508-927d-756cdb3cd4f6"
 #define WIFI_SSID "Zzz"
 #define WIFI_PASSWORD "i6b22krm"
 

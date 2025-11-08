@@ -3,11 +3,11 @@ import json
 import time
 import os
 import sys
+import argparse
 import serial
 import serial.tools.list_ports
 from datetime import datetime
 from collections import deque
-
 
 class HealthMonitorPico:
     def __init__(self, pico_port=None, interval=5, log_file="health_monitor.txt"):
@@ -15,7 +15,7 @@ class HealthMonitorPico:
         self.interval = interval
         self.running = False
         self.network_history = deque(maxlen=10)
-        self.pico_messages = deque(maxlen=20)  # ← NEW: Store last 10 Pico messages
+        self.pico_messages = deque(maxlen=20)  # Store Pico messages
         self.start_time = time.time()
         self.sample_count = 0
         self.serial_connection = None
@@ -382,23 +382,23 @@ class HealthMonitorPico:
         print(f"⏱️  Total runtime: {(time.time() - self.start_time) / 60:.1f} minutes")
         print("✓ Serial port closed")
 
-
 def main():
-    import argparse
+    # Define default values as variables
+    default_interval = 20
+    default_log_file = "health_monitor.txt"
 
     parser = argparse.ArgumentParser(description='PC Health Monitor with Pico CDC')
     parser.add_argument('--port', '-p', default=None,
                         help='COM port (e.g., COM9). Auto-detect if not specified')
-    parser.add_argument('--interval', '-i', type=int, default=15,
-                        help='Monitoring interval in seconds (default: 5)')
-    parser.add_argument('--file', '-f', default='health_monitor.txt',
-                        help='Log file name (default: health_monitor.txt)')
+    parser.add_argument('--interval', '-i', type=int, default=default_interval,
+                        help=f'Monitoring interval in seconds (default: {default_interval})')
+    parser.add_argument('--file', '-f', default=default_log_file,
+                        help=f'Log file name (default: {default_log_file})')
 
     args = parser.parse_args()
 
     monitor = HealthMonitorPico(pico_port=args.port, interval=args.interval, log_file=args.file)
     monitor.run()
-
 
 if __name__ == "__main__":
     main()
