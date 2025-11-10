@@ -32,6 +32,7 @@
 #include <mbedtls/debug.h>
 
 // Headers
+#include "msc_manager.h"
 #include "hid_config.h"
 #include "hid_manager.h"
 #include "https_config.h"
@@ -332,26 +333,6 @@ void process_json_data(char *json)
     }
 #endif
 }
-
-// [------------------------------------------------------------------------- MSC -------------------------------------------------------------------------]
-
-void tud_mount_cb(void) 
-{
-    usb_mounted = true;
-    printf("*** USB MOUNTED ***\n");
-}
-
-void tud_umount_cb(void) 
-{
-    usb_mounted = false;
-    printf("*** USB UNMOUNTED ***\n");
-}
-
-void tud_suspend_cb(bool remote_wakeup_en) { 
-    (void)remote_wakeup_en; 
-}
-
-void tud_resume_cb(void) {}
 
 // [------------------------------------------------------------------------- HTTPS -------------------------------------------------------------------------]
 
@@ -682,6 +663,18 @@ int main(void)
         }
     }
 
+    // Initialize MSC Manager
+    msc_config_t msc_cfg = {
+        .enable_mount_callbacks = true,
+        .on_mount = NULL,    // Optional: set custom callback if needed
+        .on_unmount = NULL   // Optional: set custom callback if needed
+    };
+    
+    if (!msc_manager_init(&msc_cfg))
+    {
+        printf("MSC Manager initialization failed\n");
+    }
+
     // Initialize HID Manager
     hid_config_t hid_cfg = {
     #ifdef AUTO_TRIGGER_HID
@@ -700,9 +693,8 @@ int main(void)
         printf("HID Manager initialization failed\n");
     }
     
-    // Build the sequence once at startup
+    // HID build the sequence once at startup
     hid_manager_build_sequence();
-
 
     // Launch WiFi on Core 1
     multicore_launch_core1(core1_entry);
@@ -740,7 +732,7 @@ int main(void)
     while (true)
     {
         tud_task();
-        hid_manager_task(wifi_fully_connected, usb_mounted);
+        hid_manager_task(wifi_fully_connected, msc_manager_is_mounted());
         check_atecc_button();
 
 

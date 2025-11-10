@@ -35,6 +35,7 @@ add_executable(${PROGRAM_NAME}
     main.c
     #TinyUSB logic
     msc_disk.c
+    msc_manager.c
     usb_descriptors.c
     hid_manager.c
     #WiFi logic
