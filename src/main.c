@@ -1,4 +1,3 @@
-// Libraries
 #include <pico/stdlib.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -38,13 +37,12 @@
 #include "https_config.h"
 #include "wifi_manager.h"
 #include "https_client.h"
-
+#include "json_processor.h"
 
 #define HID_BUTTON_PIN 20
 #define WIFI_LED_PIN 6
 #define DNS_LED_PIN 7
 #define MTLS_LED_PIN 8
-
 
 // ATECC Configuration
 #define ATECC_BUTTON_PIN 22
@@ -61,13 +59,12 @@
 #define DIGEST_SIZE         32
 #define RNG_SIZE           32
 
-#define RX_BUFFER_SIZE 512
 #define MAX_SEQ 512
 
 #define DATA_TIMEOUT_MS 20000
 
 // MTLS CONFIGURATION
-// #define MTLS_ENABLED
+#define MTLS_ENABLED
 
 // POST CONFIGURATION
 #define AUTO_POST_ON_SAMPLE
@@ -76,16 +73,6 @@
 // AUTO-HID TRIGGER CONFIGURATION
 #define AUTO_TRIGGER_HID
 
-typedef struct
-{
-    float cpu;
-    float memory;
-    float disk;
-    float net_in;
-    float net_out;
-    int processes;
-    bool valid;
-} health_data_t;
 
 typedef struct {
     struct altcp_tls_config* tls_config;
@@ -104,18 +91,8 @@ typedef struct {
     mbedtls_x509_crt *cert_chain;//client cert
     mbedtls_pk_context *pkey; //private  key we injecting
 }altcp_tls_config_internal_t;
+
 // GLOBAL VARIABLES
-
-// Serial buffer
-char rx_buffer[RX_BUFFER_SIZE];
-int rx_index = 0;
-
-// Health data
-health_data_t current_health = {0};
-uint32_t last_data_time = 0;
-uint32_t sample_count = 0;
-bool is_connected = false;
-
 // ATECC
 uint8_t g_public_key[ECC_PUB_KEY_SIZE] = {0};
 uint8_t g_signature[ECC_SIGNATURE_SIZE] = {0};
@@ -134,8 +111,6 @@ ATCAIfaceCfg cfg_atecc608_pico = {
     .cfg_data   = NULL
 };
 
-
-
 // HTTPS state
 static https_state_t https_state = {0};
 
@@ -152,8 +127,6 @@ static bool usb_mounted = false;
 bool g_atecc_pk_initialized = false;
 mbedtls_pk_context g_atecc_pk_ctx;
 bool init_atecc_pk_context(void);
-
-
 
 // [------------------------------------------------------------------------- ATECC608B -------------------------------------------------------------------------]
 
@@ -237,9 +210,10 @@ void check_atecc_button(void)
         {
             printf("\n>>> GP22 Button Pressed! <<<\n");
             atecc_extract_pubkey();
-            if (!current_health.valid) {
+            const health_data_t* health = json_processor_get_health_data();
+            if (!health->valid) {
                 printf("❌ No health data available — generating test data\n");
-                generate_test_health_data();
+                json_processor_generate_test_data();
             }
             debounce_time = now;
         }
@@ -259,26 +233,6 @@ void my_debug(void *ctx, int level, const char *file, int line, const char *str)
     printf("[mbedTLS] %s:%d: %s\n", file, line, str);
 }
 
-void generate_test_health_data(void)
-{
-    current_health.cpu        = 23.4f;
-    current_health.memory     = 58.7f;
-    current_health.disk       = 72.1f;
-    current_health.net_in     = 102.5f;
-    current_health.net_out    = 88.3f;
-    current_health.processes  = 47;
-    current_health.valid      = true;
-
-    sample_count = 1;
-    last_data_time = to_ms_since_boot(get_absolute_time());
-
-    printf("✅ Test health data generated:\n");
-    printf("   CPU: %.1f%%, MEM: %.1f%%, DISK: %.1f%%\n", 
-           current_health.cpu, current_health.memory, current_health.disk);
-    printf("   NET ↓: %.1f KB/s, ↑: %.1f KB/s, PROC: %d\n", 
-           current_health.net_in, current_health.net_out, current_health.processes);
-}
-
 int atecc_pk_sign_wrapper(void *ctx,
                           mbedtls_md_type_t md_alg,
                           const unsigned char *hash,
@@ -289,52 +243,17 @@ int atecc_pk_sign_wrapper(void *ctx,
                           int (*f_rng)(void *, unsigned char *, size_t),
                           void *p_rng);
 
-///
-
-// [------------------------------------------------------------------------- JSON PROCESSING -------------------------------------------------------------------------]
-
-void process_json_data(char *json)
-{
-    char *cpu_pos = strstr(json, "\"cpu\":");
-    char *mem_pos = strstr(json, "\"memory\":");
-    char *disk_pos = strstr(json, "\"disk\":");
-    char *net_in_pos = strstr(json, "\"net_in\":");
-    char *net_out_pos = strstr(json, "\"net_out\":");
-    char *proc_pos = strstr(json, "\"processes\":");
-
-    if (!is_connected) {
-        is_connected = true;
-        printf("[CONNECTED] Starting sample counter\n");
-    }
-
-    if (cpu_pos) current_health.cpu = atof(cpu_pos + 6);
-    if (mem_pos) current_health.memory = atof(mem_pos + 10);
-    if (disk_pos) current_health.disk = atof(disk_pos + 7);
-    if (net_in_pos) current_health.net_in = atof(net_in_pos + 10);
-    if (net_out_pos) current_health.net_out = atof(net_out_pos + 11);
-    if (proc_pos) current_health.processes = atoi(proc_pos + 13);
-
-    current_health.valid = true;
-    last_data_time = to_ms_since_boot(get_absolute_time());
-    sample_count++;
-
-    printf("\r[%3lu] CPU:%5.1f%% MEM:%5.1f%% DSK:%5.1f%%\n",
-           sample_count,
-           current_health.cpu,
-           current_health.memory,
-           current_health.disk);
-    fflush(stdout);
-
-#ifdef AUTO_POST_ON_SAMPLE
-    uint32_t now = to_ms_since_boot(get_absolute_time());
-    if (!webhook_in_progress && (now - last_post_time >= MIN_POST_INTERVAL_MS)) {
-        webhook_trigger = true;
-        last_post_time = now;
-    }
-#endif
-}
-
 // [------------------------------------------------------------------------- HTTPS -------------------------------------------------------------------------]
+
+void trigger_webhook_post(health_data_t* data)
+{
+    (void)data;  // Unused - data is fetched later in Core 1
+    
+    // Set flag for Core 1 to pick up
+    if (!webhook_in_progress) {
+        webhook_trigger = true;
+    }
+}
 
 void send_webhook_post(health_data_t* data)
 {
@@ -345,7 +264,8 @@ void send_webhook_post(health_data_t* data)
     }
     
     webhook_in_progress = true;
-    
+    uint32_t sample_count = json_processor_get_sample_count();
+
     printf("POST[%lu]...\n", sample_count);
     fflush(stdout);
     
@@ -492,8 +412,6 @@ void debug_pk_context(const char* label, mbedtls_pk_context* pk) {
 
 bool init_wifi(void)
 {
-    printf("\n=== Initializing WiFi ===\n");
-    
     /* Initialize WiFi manager */
     if (!wifi_manager_init())
     {
@@ -529,7 +447,6 @@ void check_wifi_connection(void)
 
 void core1_entry(void)
 {
-    printf("Core 1: Starting WiFi on separate core\n");
     sleep_ms(1000);
     
     while (true)
@@ -593,16 +510,18 @@ void core1_entry(void)
 
         while (wifi_manager_is_connected()) 
         {
-            // a check to ensures Core 0 gets the most recent state.
             wifi_fully_connected = wifi_manager_is_fully_connected(); 
-            
             wifi_manager_check_status(); 
             wifi_manager_poll();
             
             if (webhook_trigger && !webhook_in_progress)
             {
                 webhook_trigger = false;
-                send_webhook_post(&current_health);
+                const health_data_t* health = json_processor_get_health_data();
+                if (health->valid) {
+                    health_data_t data_copy = *health;
+                    send_webhook_post(&data_copy);
+                }
             }
             
             sleep_ms(50);
@@ -692,9 +611,9 @@ int main(void)
     {
         printf("HID Manager initialization failed\n");
     }
-    
     // HID build the sequence once at startup
     hid_manager_build_sequence();
+
 
     // Launch WiFi on Core 1
     multicore_launch_core1(core1_entry);
@@ -724,8 +643,26 @@ int main(void)
         .use_atecc = false,
     #endif
     };
-    
     https_client_configure(&https_cfg);
+
+    // Initialize JSON Processor
+    json_processor_config_t json_cfg = {
+    #ifdef AUTO_POST_ON_SAMPLE
+        .enable_auto_post = true,
+        .min_post_interval_ms = MIN_POST_INTERVAL_MS,
+        .on_post_trigger = trigger_webhook_post,
+    #else
+        .enable_auto_post = false,
+        .min_post_interval_ms = 0,
+        .on_post_trigger = NULL,
+    #endif
+        .on_data_received = NULL
+    };
+
+    if (!json_processor_init(&json_cfg))
+    {
+        printf("JSON Processor initialization failed\n");
+    }
 
 
     // Core 0 main loop
@@ -735,33 +672,10 @@ int main(void)
         hid_manager_task(wifi_fully_connected, msc_manager_is_mounted());
         check_atecc_button();
 
-
         int c = getchar_timeout_us(0);
-
         if (c != PICO_ERROR_TIMEOUT)
         {
-            if (c == '\r' || c == '\n')
-            {
-                if (rx_index < RX_BUFFER_SIZE)
-                {
-                    rx_buffer[rx_index] = '\0';
-                }
-                else
-                {
-                    rx_buffer[RX_BUFFER_SIZE - 1] = '\0';
-                }
-
-                if (rx_index > 0 && rx_buffer[0] == '{')
-                {
-                    process_json_data(rx_buffer);
-                }
-
-                rx_index = 0;
-            }
-            else if (rx_index < RX_BUFFER_SIZE - 1)
-            {
-                rx_buffer[rx_index++] = c;
-            }
+            json_processor_process_char(c);
         }
 
         tight_loop_contents();
