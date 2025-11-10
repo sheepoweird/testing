@@ -12,9 +12,6 @@ extern "C" {
 #include "lwip/altcp.h"
 #include "lwip/ip_addr.h"
 
-/*******************************************************************************
- * CONSTANTS AND MACROS
- ******************************************************************************/
 #define HTTPS_DEFAULT_PORT          443U
 #define HTTPS_DNS_TIMEOUT_MS        10000U
 #define HTTPS_CONNECT_TIMEOUT_MS    100000U
@@ -22,13 +19,6 @@ extern "C" {
 #define HTTPS_MAX_REQUEST_SIZE      2048U
 #define HTTPS_MAX_JSON_BODY_SIZE    512U
 
-/*******************************************************************************
- * TYPE DEFINITIONS
- ******************************************************************************/
-
-/**
- * @brief HTTPS client status enumeration
- */
 typedef enum
 {
     HTTPS_STATUS_IDLE = 0,          /**< Client is idle */
@@ -41,9 +31,6 @@ typedef enum
     HTTPS_STATUS_ERROR              /**< Error occurred */
 } https_status_t;
 
-/**
- * @brief HTTPS operation configuration
- */
 typedef struct
 {
     const char *hostname;           /**< Server hostname */
@@ -57,9 +44,6 @@ typedef struct
     bool enable_mtls;               /**< Enable mutual TLS */
 } https_config_t;
 
-/**
- * @brief HTTPS client state structure
- */
 typedef struct
 {
     https_status_t status;          /**< Current operation status */
@@ -74,152 +58,41 @@ typedef struct
     bool dns_resolved;              /**< DNS resolution complete flag */
 } https_client_state_t;
 
-/*******************************************************************************
- * PUBLIC FUNCTION PROTOTYPES
- ******************************************************************************/
-
-/**
- * @brief Initialize HTTPS client module
- * 
- * This function must be called before any other HTTPS client operations.
- * 
- * @return true if initialization successful, false otherwise
- */
 bool https_client_init(void);
 
-/**
- * @brief Configure HTTPS client for an operation
- * 
- * Sets up the HTTPS client with server details and certificates.
- * 
- * @param[in] config    Pointer to configuration structure
- * 
- * @return true if configuration successful, false otherwise
- */
 bool https_client_configure(const https_config_t *config);
 
-/**
- * @brief Send HTTPS POST request with JSON payload
- * 
- * Performs complete HTTPS POST operation including DNS resolution,
- * TLS handshake, request sending, and response handling.
- * 
- * @param[in] hostname      Server hostname
- * @param[in] path          Request path
- * @param[in] json_body     JSON payload string
- * @param[in] body_len      Length of JSON payload
- * 
- * @return true if request sent successfully, false otherwise
- */
 bool https_client_post_json(const char *hostname, 
                             const char *path,
                             const char *json_body,
                             size_t body_len);
 
-/**
- * @brief Send pre-configured HTTPS POST request
- * 
- * Uses configuration set by https_client_configure().
- * 
- * @param[in] path          Request path
- * @param[in] json_body     JSON payload string
- * @param[in] body_len      Length of JSON payload
- * 
- * @return true if request sent successfully, false otherwise
- */
 bool https_client_post(const char *path,
                        const char *json_body,
                        size_t body_len);
 
-/**
- * @brief Get current HTTPS client status
- * 
- * @return Current client status
- */
 https_status_t https_client_get_status(void);
 
-/**
- * @brief Get HTTPS client state
- * 
- * Returns pointer to internal state for monitoring.
- * 
- * @return Pointer to client state (read-only)
- */
 const https_client_state_t *https_client_get_state(void);
 
-/**
- * @brief Check if HTTPS operation is in progress
- * 
- * @return true if operation in progress, false otherwise
- */
 bool https_client_is_busy(void);
 
-/**
- * @brief Abort current HTTPS operation
- * 
- * Cleanly closes connection and resets state.
- */
 void https_client_abort(void);
 
-/**
- * @brief Cleanup and deinitialize HTTPS client
- * 
- * Frees all resources and closes connections.
- */
 void https_client_deinit(void);
 
-/**
- * @brief Resolve DNS hostname to IP address
- * 
- * Performs blocking DNS resolution with timeout.
- * 
- * @param[in]  hostname     Hostname to resolve
- * @param[out] ip_addr      Resolved IP address
- * @param[in]  timeout_ms   Timeout in milliseconds
- * 
- * @return ERR_OK if successful, lwIP error code otherwise
- */
 err_t https_client_resolve_dns(const char *hostname,
                                ip_addr_t *ip_addr,
                                uint32_t timeout_ms);
 
-/**
- * @brief Get bytes received in last response
- * 
- * @return Number of bytes received
- */
 uint16_t https_client_get_bytes_received(void);
 
-/**
- * @brief Reset HTTPS client state
- * 
- * Resets state machine to idle without freeing resources.
- */
 void https_client_reset(void);
 
-/*******************************************************************************
- * CALLBACK FUNCTION TYPES
- ******************************************************************************/
-
-/**
- * @brief HTTPS response callback function type
- * 
- * Called when response data is received.
- * 
- * @param[in] data      Response data buffer
- * @param[in] len       Length of response data
- * @param[in] user_arg  User-provided argument
- */
 typedef void (*https_response_callback_t)(const uint8_t *data, 
                                           size_t len, 
                                           void *user_arg);
 
-/**
- * @brief Set response callback function
- * 
- * @param[in] callback  Callback function pointer
- * @param[in] user_arg  User argument passed to callback
- */
 void https_client_set_response_callback(https_response_callback_t callback,
                                        void *user_arg);
 

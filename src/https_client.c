@@ -12,21 +12,11 @@
 #include <string.h>
 #include <stdlib.h>
 
-/*******************************************************************************
- * EXTERNAL DEPENDENCIES
- ******************************************************************************/
 /* ATECC608B functions - defined in main.c or atecc module */
 extern bool g_atecc_pk_initialized;
 extern mbedtls_pk_context g_atecc_pk_ctx;
 extern bool init_atecc_pk_context(void);
 
-/*******************************************************************************
- * PRIVATE TYPE DEFINITIONS
- ******************************************************************************/
-
-/**
- * @brief Internal TLS configuration structure (from lwIP)
- */
 typedef struct {
     mbedtls_ssl_config conf;
     mbedtls_x509_crt *cert;
@@ -34,17 +24,11 @@ typedef struct {
     mbedtls_pk_context *pkey;
 } altcp_tls_config_internal_t;
 
-/*******************************************************************************
- * PRIVATE CONSTANTS
- ******************************************************************************/
 #define DNS_MAX_RETRIES             10U
 #define DNS_RETRY_DELAY_MS          100U
 #define TLS_HANDSHAKE_TIMEOUT_MS    100000U
 #define TLS_HANDSHAKE_RETRY_DELAY_MS 100U
 
-/*******************************************************************************
- * PRIVATE VARIABLES
- ******************************************************************************/
 static https_client_state_t g_https_state = {0};
 static https_config_t g_https_config = {0};
 static https_response_callback_t g_response_callback = NULL;
@@ -54,9 +38,6 @@ static void *g_response_callback_arg = NULL;
 static const uint8_t DNS_LED_PIN = 7;
 static const uint8_t MTLS_LED_PIN = 8;
 
-/*******************************************************************************
- * PRIVATE FUNCTION PROTOTYPES
- ******************************************************************************/
 static void https_dns_callback(const char *name, const ip_addr_t *ipaddr, void *arg);
 static err_t https_connected_callback(void *arg, struct altcp_pcb *tpcb, err_t err);
 static err_t https_recv_callback(void *arg, struct altcp_pcb *tpcb, struct pbuf *p, err_t err);
@@ -66,13 +47,6 @@ static bool https_integrate_atecc(void);
 static void https_cleanup_connection(void);
 static void mbedtls_debug_callback(void *ctx, int level, const char *file, int line, const char *str);
 
-/*******************************************************************************
- * PUBLIC FUNCTION IMPLEMENTATIONS
- ******************************************************************************/
-
-/**
- * @brief Initialize HTTPS client module
- */
 bool https_client_init(void)
 {
     printf("HTTPS Client: Initializing...\n");
@@ -90,9 +64,6 @@ bool https_client_init(void)
     return true;
 }
 
-/**
- * @brief Configure HTTPS client
- */
 bool https_client_configure(const https_config_t *config)
 {
     if (config == NULL)
@@ -123,9 +94,6 @@ bool https_client_configure(const https_config_t *config)
     return true;
 }
 
-/**
- * @brief Send HTTPS POST request with JSON
- */
 bool https_client_post_json(const char *hostname,
                             const char *path,
                             const char *json_body,
@@ -152,9 +120,6 @@ bool https_client_post_json(const char *hostname,
     return https_client_post(path, json_body, body_len);
 }
 
-/**
- * @brief Send HTTPS POST request
- */
 bool https_client_post(const char *path,
                        const char *json_body,
                        size_t body_len)
@@ -352,33 +317,21 @@ bool https_client_post(const char *path,
     return true;
 }
 
-/**
- * @brief Get current HTTPS status
- */
 https_status_t https_client_get_status(void)
 {
     return g_https_state.status;
 }
 
-/**
- * @brief Get HTTPS client state
- */
 const https_client_state_t *https_client_get_state(void)
 {
     return &g_https_state;
 }
 
-/**
- * @brief Check if operation is in progress
- */
 bool https_client_is_busy(void)
 {
     return g_https_state.operation_in_progress;
 }
 
-/**
- * @brief Abort current operation
- */
 void https_client_abort(void)
 {
     if (g_https_state.operation_in_progress)
@@ -390,9 +343,6 @@ void https_client_abort(void)
     }
 }
 
-/**
- * @brief Deinitialize HTTPS client
- */
 void https_client_deinit(void)
 {
     https_client_abort();
@@ -401,9 +351,6 @@ void https_client_deinit(void)
     printf("HTTPS Client: Deinitialized\n");
 }
 
-/**
- * @brief Resolve DNS hostname
- */
 err_t https_client_resolve_dns(const char *hostname,
                                ip_addr_t *ip_addr,
                                uint32_t timeout_ms)
@@ -446,17 +393,11 @@ err_t https_client_resolve_dns(const char *hostname,
     return dns_err;
 }
 
-/**
- * @brief Get bytes received
- */
 uint16_t https_client_get_bytes_received(void)
 {
     return g_https_state.bytes_received;
 }
 
-/**
- * @brief Reset client state
- */
 void https_client_reset(void)
 {
     https_cleanup_connection();
@@ -468,9 +409,6 @@ void https_client_reset(void)
     g_https_state.dns_resolved = false;
 }
 
-/**
- * @brief Set response callback
- */
 void https_client_set_response_callback(https_response_callback_t callback,
                                        void *user_arg)
 {
@@ -478,17 +416,6 @@ void https_client_set_response_callback(https_response_callback_t callback,
     g_response_callback_arg = user_arg;
 }
 
-/*******************************************************************************
- * PRIVATE FUNCTION IMPLEMENTATIONS - CONTINUED IN NEXT PART
- ******************************************************************************/
-
-/*******************************************************************************
- * PRIVATE FUNCTION IMPLEMENTATIONS
- ******************************************************************************/
-
-/**
- * @brief DNS resolution callback
- */
 static void https_dns_callback(const char *name, const ip_addr_t *ipaddr, void *arg)
 {
     if (ipaddr != NULL)
@@ -505,9 +432,6 @@ static void https_dns_callback(const char *name, const ip_addr_t *ipaddr, void *
     }
 }
 
-/**
- * @brief HTTPS connection established callback
- */
 static err_t https_connected_callback(void *arg, struct altcp_pcb *tpcb, err_t err)
 {
     https_client_state_t *state = (https_client_state_t*)arg;
@@ -527,9 +451,6 @@ static err_t https_connected_callback(void *arg, struct altcp_pcb *tpcb, err_t e
     return ERR_OK;
 }
 
-/**
- * @brief HTTPS data received callback
- */
 static err_t https_recv_callback(void *arg, struct altcp_pcb *tpcb, struct pbuf *p, err_t err)
 {
     https_client_state_t *state = (https_client_state_t*)arg;
@@ -559,9 +480,6 @@ static err_t https_recv_callback(void *arg, struct altcp_pcb *tpcb, struct pbuf 
     return ERR_OK;
 }
 
-/**
- * @brief HTTPS error callback
- */
 static void https_err_callback(void *arg, err_t err)
 {
     printf("HTTPS Client: Connection error: %d\n", err);
@@ -572,9 +490,6 @@ static void https_err_callback(void *arg, err_t err)
     gpio_put(MTLS_LED_PIN, 0);
 }
 
-/**
- * @brief Setup TLS configuration
- */
 static bool https_setup_tls_config(const https_config_t *config)
 {
     if (config == NULL)
@@ -627,9 +542,6 @@ static bool https_setup_tls_config(const https_config_t *config)
     return true;
 }
 
-/**
- * @brief Integrate ATECC608B hardware signing
- */
 static bool https_integrate_atecc(void)
 {
     if (!g_atecc_pk_initialized)
@@ -724,9 +636,6 @@ static bool https_integrate_atecc(void)
     }
 }
 
-/**
- * @brief Cleanup HTTPS connection
- */
 static void https_cleanup_connection(void)
 {
     printf("HTTPS Client: Cleaning up connection...\n");
@@ -755,9 +664,6 @@ static void https_cleanup_connection(void)
     g_https_state.is_connected = false;
 }
 
-/**
- * @brief mbedTLS debug callback
- */
 static void mbedtls_debug_callback(void *ctx, int level, 
                                   const char *file, int line, 
                                   const char *str)

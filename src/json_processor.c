@@ -43,15 +43,6 @@ static json_processor_state_t json_state = {
     .on_post_trigger = NULL
 };
 
-// ============================================================================
-// Private Functions
-// ============================================================================
-
-/**
- * @brief Parse JSON data and extract health metrics
- * 
- * @param json JSON string to parse
- */
 static void parse_json_data(char *json)
 {
     char *cpu_pos = strstr(json, "\"cpu\":");
@@ -101,10 +92,6 @@ static void parse_json_data(char *json)
         }
     }
 }
-
-// ============================================================================
-// Public API Implementation
-// ============================================================================
 
 bool json_processor_init(const json_processor_config_t *config)
 {
