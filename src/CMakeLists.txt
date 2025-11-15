@@ -43,7 +43,7 @@ add_executable(${PROGRAM_NAME}
     #POST logic
     ### https_client.c
     #JSON logic
-    ### json_processor.c
+    json_processor.c
     #ATECC logic
     hal_pico_i2c.c 
     ../lib/cryptoauthlib/lib/mbedtls/atca_mbedtls_wrap.c
