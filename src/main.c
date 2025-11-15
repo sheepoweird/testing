@@ -33,7 +33,7 @@
 #include <mbedtls/debug.h>
 
 // Headers
-
+#include "msc_manager.h"
 #include "hid_manager.h"
 
 
@@ -342,25 +342,6 @@ void process_json_data(char *json)
 #endif
 }
 
-// [------------------------------------------------------------------------- MSC -------------------------------------------------------------------------]
-
-void tud_mount_cb(void) 
-{
-    usb_mounted = true;
-    printf("*** USB MOUNTED ***\n");
-}
-
-void tud_umount_cb(void) 
-{
-    usb_mounted = false;
-    printf("*** USB UNMOUNTED ***\n");
-}
-
-void tud_suspend_cb(bool remote_wakeup_en) { 
-    (void)remote_wakeup_en; 
-}
-
-void tud_resume_cb(void) {}
 // [------------------------------------------------------------------------- HTTPS -------------------------------------------------------------------------]
 
 void dns_callback(const char* name, const ip_addr_t* ipaddr, void* arg)
@@ -1060,6 +1041,10 @@ int main(void)
     gpio_init(MTLS_LED_PIN);
     gpio_set_dir(MTLS_LED_PIN, GPIO_OUT);
     gpio_put(MTLS_LED_PIN, 0);
+    
+    gpio_init(ATECC_BUTTON_PIN);
+    gpio_set_dir(ATECC_BUTTON_PIN, GPIO_IN);
+    gpio_pull_up(ATECC_BUTTON_PIN);
 
     // ATECC608B Initialization
     printf("\n=== Initializing ATECC608B ===\n");
@@ -1087,12 +1072,18 @@ int main(void)
             }
         }
     }
+
+    // Initialize MSC Manager
+    msc_config_t msc_cfg = {
+        .enable_mount_callbacks = true,
+        .on_mount = NULL,    // Optional: set custom callback if needed
+        .on_unmount = NULL   // Optional: set custom callback if needed
+    };
     
-    gpio_init(ATECC_BUTTON_PIN);
-    gpio_set_dir(ATECC_BUTTON_PIN, GPIO_IN);
-    gpio_pull_up(ATECC_BUTTON_PIN);
-    
-    printf("=== ATECC Ready: Press GP22 to extract public key ===\n\n");
+    if (!msc_manager_init(&msc_cfg))
+    {
+        printf("MSC Manager initialization failed\n");
+    }
 
     // Initialize HID Manager
     hid_config_t hid_cfg = {
@@ -1124,7 +1115,7 @@ int main(void)
     while (true)
     {
         tud_task();
-        hid_manager_task(wifi_fully_connected, usb_mounted);
+        hid_manager_task(wifi_fully_connected, msc_manager_is_mounted());
         check_atecc_button();
 
         int c = getchar_timeout_us(0);
