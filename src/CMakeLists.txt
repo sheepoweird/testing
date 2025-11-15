@@ -39,7 +39,7 @@ add_executable(${PROGRAM_NAME}
     usb_descriptors.c
     hid_manager.c
     #WiFi logic
-    ### wifi_manager.c
+    wifi_manager.c
     #POST logic
     ### https_client.c
     #JSON logic
