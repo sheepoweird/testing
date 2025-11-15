@@ -33,10 +33,18 @@ add_subdirectory(../lib/cryptoauthlib/lib build_cryptoauth)
 add_executable(${PROGRAM_NAME}
     hw_config.c
     main.c
-    #TinyUSB Libraries
+    #TinyUSB logic
     msc_disk.c
+    ### msc_manager.c
     usb_descriptors.c
-    #ATECC Libraries
+    hid_manager.c
+    #WiFi logic
+    ### wifi_manager.c
+    #POST logic
+    ### https_client.c
+    #JSON logic
+    ### json_processor.c
+    #ATECC logic
     hal_pico_i2c.c 
     ../lib/cryptoauthlib/lib/mbedtls/atca_mbedtls_wrap.c
 )

@@ -32,9 +32,12 @@
 #include "mbedtls/x509_crt.h"
 #include <mbedtls/debug.h>
 
+// Headers
+
+#include "hid_manager.h"
+
+
 #define MBEDTLS_ECDSA_SIGN_ALT
-
-
 
 #define HID_BUTTON_PIN 20
 #define WIFI_LED_PIN 6
@@ -93,12 +96,6 @@ typedef struct {
     health_data_t pending_data;
 } https_state_t;
 
-typedef struct
-{
-    uint8_t modifier;
-    uint8_t key;
-} key_action_t;
-
 typedef struct {
     mbedtls_ssl_config conf; //ca cert
     mbedtls_x509_crt *cert; // ca cert
@@ -156,10 +153,6 @@ static bool reconnect_pending = false;
 static uint32_t last_wifi_check = 0;
 static uint32_t wifi_disconnect_time = 0;
 static bool cyw43_initialized = false;
-
-// HID sequence
-static key_action_t sequence[MAX_SEQ];
-static int seq_len = 0;
 
 //mtls state
 static bool g_atecc_pk_initialized = false;
@@ -353,15 +346,14 @@ void process_json_data(char *json)
 
 void tud_mount_cb(void) 
 {
-    sleep_ms(5000);
     usb_mounted = true;
-    sleep_ms(5000);
     printf("*** USB MOUNTED ***\n");
 }
 
 void tud_umount_cb(void) 
 {
     usb_mounted = false;
+    printf("*** USB UNMOUNTED ***\n");
 }
 
 void tud_suspend_cb(bool remote_wakeup_en) { 
@@ -369,156 +361,7 @@ void tud_suspend_cb(bool remote_wakeup_en) {
 }
 
 void tud_resume_cb(void) {}
-
-// [------------------------------------------------------------------------- HID -------------------------------------------------------------------------]
-
-
-static inline void add_key(uint8_t mod, uint8_t key, int delay_count)
-{
-    if (seq_len >= MAX_SEQ - 2)
-        return;
-    sequence[seq_len++] = (key_action_t){mod, key};
-    sequence[seq_len++] = (key_action_t){0, 0};
-    for (int i = 0; i < delay_count && seq_len < MAX_SEQ; i++)
-    {
-        sequence[seq_len++] = (key_action_t){0, 0};
-    }
-}
-
-static void build_sequence(void)
-{
-    seq_len = 0;
-
-    add_key(KEYBOARD_MODIFIER_LEFTGUI, HID_KEY_R, 8);
-    add_key(0, HID_KEY_C, 1);
-    add_key(0, HID_KEY_M, 1);
-    add_key(0, HID_KEY_D, 1);
-    add_key(0, HID_KEY_ENTER, 40);
-
-    char drives[] = "DEFG";
-    for (int d = 0; d < 4; d++)
-    {
-        add_key(KEYBOARD_MODIFIER_LEFTSHIFT, HID_KEY_A + (drives[d] - 'A'), 1);
-        add_key(KEYBOARD_MODIFIER_LEFTSHIFT, HID_KEY_SEMICOLON, 1);
-        add_key(0, HID_KEY_BACKSLASH, 1);
-        add_key(0, HID_KEY_H, 0);
-        add_key(0, HID_KEY_E, 0);
-        add_key(0, HID_KEY_A, 0);
-        add_key(0, HID_KEY_L, 0);
-        add_key(0, HID_KEY_T, 0);
-        add_key(0, HID_KEY_H, 0);
-        add_key(KEYBOARD_MODIFIER_LEFTSHIFT, HID_KEY_MINUS, 0);
-        add_key(0, HID_KEY_C, 0);
-        add_key(0, HID_KEY_D, 0);
-        add_key(0, HID_KEY_C, 0);
-        add_key(0, HID_KEY_PERIOD, 0);
-        add_key(0, HID_KEY_E, 0);
-        add_key(0, HID_KEY_X, 0);
-        add_key(0, HID_KEY_E, 1);
-        add_key(0, HID_KEY_ENTER, 3);
-    }
-
-    for (int i = 0; i < 15; i++)
-    {
-        if (seq_len < MAX_SEQ)
-            sequence[seq_len++] = (key_action_t){0, 0};
-    }
-
-    add_key(0, HID_KEY_E, 4);
-    add_key(0, HID_KEY_X, 4);
-    add_key(0, HID_KEY_I, 4);
-    add_key(0, HID_KEY_T, 4);
-    add_key(0, HID_KEY_ENTER, 0);
-}
-
-void hid_task(void)
-{
-    const uint32_t interval_ms = 20;
-    static uint32_t last_update = 0;
-    static bool hid_running = false;
-    static int seq_index = 0;
-
-#ifdef AUTO_TRIGGER_HID
-    if (!auto_trigger_executed && wifi_fully_connected && usb_mounted) {
-        static uint32_t trigger_start_time = 0;
-        
-        if (trigger_start_time == 0) {
-            trigger_start_time = to_ms_since_boot(get_absolute_time());
-            printf("\n*** WIFI + USB READY - 20 second countdown started ***\n");
-        }
-        
-        uint32_t now = to_ms_since_boot(get_absolute_time());
-        if (now - trigger_start_time >= 20000) {
-            printf("*** AUTO-TRIGGERING HID SEQUENCE ***\n");
-            build_sequence();
-            hid_running = true;
-            seq_index = 0;
-            last_update = now;
-            auto_trigger_executed = true;
-        }
-    }
-#endif
-
-    // Manual trigger
-    static bool last_button_state = true;
-    bool current_state = gpio_get(HID_BUTTON_PIN);
-    static uint32_t debounce_time = 0;
-    uint32_t now_hid = to_ms_since_boot(get_absolute_time());
-
-    if (!current_state && last_button_state) {
-        if (now_hid - debounce_time > 200) {
-            printf("\n>>> GP20 Button Pressed! Starting HID sequence... <<<\n");
-            build_sequence();
-            hid_running = true;
-            seq_index = 0;
-            last_update = now_hid;
-            debounce_time = now_hid;
-        }
-    }
-    last_button_state = current_state;
-
-    if (!hid_running)
-        return;
-
-    if (!tud_hid_ready())
-        return;
-
-    uint32_t now = to_ms_since_boot(get_absolute_time());
-    if (now - last_update < interval_ms)
-        return;
-
-    last_update = now;
-
-    if (seq_index >= seq_len) {
-        hid_running = false;
-        printf("HID sequence completed!\n\n");
-        return;
-    }
-
-    key_action_t action = sequence[seq_index++];
-
-    uint8_t keycode[6] = {0};
-    if (action.key != 0) {
-        keycode[0] = action.key;
-    }
-
-    tud_hid_keyboard_report(REPORT_ID_KEYBOARD, action.modifier, keycode);
-}
-
-uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t report_type, uint8_t* buffer, uint16_t reqlen)
-{
-    (void)itf; (void)report_id; (void)report_type; (void)buffer; (void)reqlen;
-    return 0;
-}
-
-void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t report_type, uint8_t const* buffer, uint16_t bufsize)
-{
-    (void)itf; (void)report_id; (void)report_type; (void)buffer; (void)bufsize;
-}
-
-// =============================================================================
-// HTTPS CALLBACK FUNCTIONS
-// =============================================================================
+// [------------------------------------------------------------------------- HTTPS -------------------------------------------------------------------------]
 
 void dns_callback(const char* name, const ip_addr_t* ipaddr, void* arg)
 {
@@ -1251,6 +1094,28 @@ int main(void)
     
     printf("=== ATECC Ready: Press GP22 to extract public key ===\n\n");
 
+    // Initialize HID Manager
+    hid_config_t hid_cfg = {
+    #ifdef AUTO_TRIGGER_HID
+        .enable_auto_trigger = true,
+        .auto_trigger_delay_ms = 20000,  // 20 seconds
+    #else
+        .enable_auto_trigger = false,
+        .auto_trigger_delay_ms = 0,
+    #endif
+        .enable_manual_trigger = true,
+        .trigger_button_pin = HID_BUTTON_PIN  // GP20
+    };
+    
+    if (!hid_manager_init(&hid_cfg))
+    {
+        printf("HID Manager initialization failed\n");
+    }
+
+    // Build the sequence once at startup
+    hid_manager_build_sequence();
+
+
     // Launch WiFi on Core 1
     multicore_launch_core1(core1_entry);
     sleep_ms(2000);
@@ -1259,7 +1124,7 @@ int main(void)
     while (true)
     {
         tud_task();
-        hid_task();
+        hid_manager_task(wifi_fully_connected, usb_mounted);
         check_atecc_button();
 
         int c = getchar_timeout_us(0);
@@ -1307,9 +1172,6 @@ int main(void)
 // LED 6 WIFI Connection status ✅
 // LED 7 DNS Status ✅
 // LED 8 MTLS Status 
-// LED 9 Write to server Fail (blinking only else off)
-
-// remove FATFS (might need to re-add write for writing public key and certs)
 
 
 
