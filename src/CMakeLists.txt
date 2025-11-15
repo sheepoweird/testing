@@ -41,7 +41,7 @@ add_executable(${PROGRAM_NAME}
     #WiFi logic
     wifi_manager.c
     #POST logic
-    https_client.c
+    https_manager.c
     #JSON logic
     json_processor.c
     #ATECC logic

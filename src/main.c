@@ -32,12 +32,13 @@
 
 // Headers
 #include "msc_manager.h"
-#include "hid_config.h"
 #include "hid_manager.h"
-#include "https_config.h"
-#include "wifi_manager.h"
-#include "https_client.h"
 #include "json_processor.h"
+#include "wifi_manager.h"
+#include "https_manager.h"
+
+
+#define MBEDTLS_ECDSA_SIGN_ALT
 
 #define HID_BUTTON_PIN 20
 #define WIFI_LED_PIN 6
@@ -73,26 +74,6 @@
 // AUTO-HID TRIGGER CONFIGURATION
 #define AUTO_TRIGGER_HID
 
-
-typedef struct {
-    struct altcp_tls_config* tls_config;
-    struct altcp_pcb* pcb;
-    bool connected;
-    bool request_sent;
-    bool operation_in_progress;
-    uint16_t bytes_received;
-    uint32_t operation_start_time;
-    health_data_t pending_data;
-} https_state_t;
-
-typedef struct {
-    mbedtls_ssl_config conf; //ca cert
-    mbedtls_x509_crt *cert; // ca cert
-    mbedtls_x509_crt *cert_chain;//client cert
-    mbedtls_pk_context *pkey; //private  key we injecting
-}altcp_tls_config_internal_t;
-
-// GLOBAL VARIABLES
 // ATECC
 uint8_t g_public_key[ECC_PUB_KEY_SIZE] = {0};
 uint8_t g_signature[ECC_SIGNATURE_SIZE] = {0};
@@ -111,9 +92,6 @@ ATCAIfaceCfg cfg_atecc608_pico = {
     .cfg_data   = NULL
 };
 
-// HTTPS state
-static https_state_t https_state = {0};
-
 // Inter-core communication
 static volatile bool webhook_trigger = false;
 static volatile bool webhook_in_progress = false;
@@ -122,13 +100,14 @@ static uint32_t last_post_time = 0;
 // Auto-trigger variables
 static volatile bool wifi_fully_connected = false;
 static bool usb_mounted = false;
+static bool auto_trigger_executed = false;
 
 //mtls state
 bool g_atecc_pk_initialized = false;
 mbedtls_pk_context g_atecc_pk_ctx;
 bool init_atecc_pk_context(void);
 
-// [------------------------------------------------------------------------- ATECC608B -------------------------------------------------------------------------]
+// [------------------------------------------------------------------------- ATECC608B - Testing -------------------------------------------------------------------------]
 
 void print_hex(const uint8_t *data, size_t len) {
     for (size_t i = 0; i < len; i++) {
@@ -243,118 +222,16 @@ int atecc_pk_sign_wrapper(void *ctx,
                           int (*f_rng)(void *, unsigned char *, size_t),
                           void *p_rng);
 
-// [------------------------------------------------------------------------- HTTPS -------------------------------------------------------------------------]
 
-void trigger_webhook_post(health_data_t* data)
+
+// [------------------------------------------------------------------------- ATECC608B - Signing -------------------------------------------------------------------------]
+
+int atca_mbedtls_ecdsa_sign(const mbedtls_mpi* data, mbedtls_mpi* r, mbedtls_mpi* s,
+                            const unsigned char* msg, size_t msg_len)
 {
-    (void)data;  // Unused - data is fetched later in Core 1
-    
-    // Set flag for Core 1 to pick up
-    if (!webhook_in_progress) {
-        webhook_trigger = true;
-    }
-}
+    (void)data;  // Unused — ATECC uses slot instead
 
-void send_webhook_post(health_data_t* data)
-{
-    if (https_client_is_busy())
-    {
-        printf("HTTPS: Operation already in progress, skipping\n");
-        return;
-    }
-    
-    webhook_in_progress = true;
-    uint32_t sample_count = json_processor_get_sample_count();
-
-    printf("POST[%lu]...\n", sample_count);
-    fflush(stdout);
-    
-    /* Build JSON payload */
-    char json_body[HTTPS_MAX_JSON_BODY_SIZE];
-    int body_len = snprintf(json_body, sizeof(json_body),
-                           "{\"sample\":%lu,\"timestamp\":%lu,\"device\":\"Pico-W\","
-                           "\"cpu\":%.1f,\"mem\":%.1f,\"disk\":%.1f,"
-                           "\"net_in\":%.1f,\"net_out\":%.1f,\"proc\":%d}",
-                           sample_count,
-                           to_ms_since_boot(get_absolute_time()),
-                           data->cpu,
-                           data->memory,
-                           data->disk,
-                           data->net_in,
-                           data->net_out,
-                           data->processes);
-    
-    if (body_len < 0 || body_len >= (int)sizeof(json_body))
-    {
-        printf("JSON payload too large\n");
-        webhook_in_progress = false;
-        return;
-    }
-    
-    /* Build request path */
-    char path[128];
-    snprintf(path, sizeof(path), "/%s", WEBHOOK_TOKEN);
-    
-    /* Send HTTPS POST request */
-    bool success = https_client_post(path, json_body, body_len);
-    
-    if (success)
-    {
-        printf("POST complete: %u bytes received\n", 
-               https_client_get_bytes_received());
-    }
-    else
-    {
-        printf("POST failed\n");
-    }
-    
-    webhook_in_progress = false;
-}
-
-bool init_atecc_pk_context(void)
-{
-    if (!g_atecc_pk_initialized)
-    {
-        mbedtls_pk_init(&g_atecc_pk_ctx);
-        
-        int ret = mbedtls_pk_setup(&g_atecc_pk_ctx, mbedtls_pk_info_from_type(MBEDTLS_PK_ECKEY));
-        
-        if (ret != 0)
-        {
-            printf("❌ Failed to setup ATECC PK context: -0x%04x\n", -ret);
-            return false;
-        }
-        
-        g_atecc_pk_initialized = true;
-        printf("✅ ATECC PK context initialized\n");
-    }
-    
-    return true;
-}
-
-int mbedtls_ecdsa_sign(mbedtls_ecp_group *grp, 
-                       mbedtls_mpi *r, 
-                       mbedtls_mpi *s,
-                       const mbedtls_mpi *d, 
-                       const unsigned char *buf, 
-                       size_t blen,
-                       int (*f_rng)(void *, unsigned char *, size_t), 
-                       void *p_rng) 
-{
-    (void)grp;    /* Unused - ATECC uses P-256 internally */
-    (void)d;      /* Unused - ATECC uses key from slot */
-    (void)f_rng;  /* Unused - ATECC has hardware RNG */
-    (void)p_rng;  /* Unused */
-    
-    ATCA_STATUS status;
-    
-    printf("🚨 MBEDTLS_ECDSA_SIGN: ATECC hardware signing called\n");
-    printf("   Buffer length: %zu bytes\n", blen);
-    
-    /* Verify hash length */
-    if (blen != 32) 
-    {
-        printf("❌ Expected 32-byte hash, got %zu bytes\n", blen);
+    if (!msg || msg_len != 32 || !r || !s) {
         return MBEDTLS_ERR_ECP_BAD_INPUT_DATA;
     }
     
@@ -386,9 +263,125 @@ int mbedtls_ecdsa_sign(mbedtls_ecp_group *grp,
         printf("❌ Failed to read signature S component: -0x%04x\n", -ret);
         return ret;
     }
-    
-    printf("✅ ATECC hardware signature successful!\n");
+    return ret;
+}
+
+int mbedtls_ecdsa_sign(mbedtls_ecp_group *grp, 
+                        mbedtls_mpi *r, 
+                        mbedtls_mpi *s,
+                        const mbedtls_mpi *d, 
+                        const unsigned char *buf, 
+                        size_t blen,
+                        int (*f_rng)(void *, unsigned char *, size_t), 
+                        void *p_rng) {
+        fflush(stdout);
+        ATCA_STATUS status;
+        printf("🚨🚨🚨 MBEDTLS_ECDSA_SIGN CALLED! 🚨🚨🚨\n");
+        printf("bettter be called");
+        printf("Buffer length: %zu\n", blen);
+        
+        // Convert the MPI hash to a 32-byte buffer for ATECC
+        uint8_t hash[32];
+        status = atcab_random(hash);///hello
+        if (blen != 32) {
+            printf("❌ Expected 32-byte hash, got %zu\n", blen);
+            return MBEDTLS_ERR_ECP_BAD_INPUT_DATA;
+        }
+        memcpy(hash, buf, 32);
+        
+        // Call ATECC hardware to sign
+        uint8_t signature[64];
+        status = atcab_sign(TARGET_SLOT, hash, signature);
+        
+        if (status != ATCA_SUCCESS) {
+            printf("❌ ATECC sign failed: 0x%02X\n", status);
+        }
+        
+        // Convert ATECC signature (R||S) to mbedTLS MPIs
+        int ret = mbedtls_mpi_read_binary(r, signature, 32);
+        if (ret != 0) {
+            printf("❌ Failed to read R: -0x%04x\n", -ret);
+            return ret;
+        }
+        
+        ret = mbedtls_mpi_read_binary(s, signature + 32, 32);
+        if (ret != 0) {
+            printf("❌ Failed to read S: -0x%04x\n", -ret);
+            return ret;
+        }
+        
+    printf("✅ ATECC signature successful!\n");
     return 0;
+}
+
+// [------------------------------------------------------------------------- HTTPS - POST -------------------------------------------------------------------------]
+
+void trigger_webhook_post(health_data_t* data)
+{
+    (void)data;  // Unused - data is fetched later in Core 1
+    
+    // Set flag for Core 1 to pick up
+    if (!webhook_in_progress) {
+        webhook_trigger = true;
+    }
+}
+
+void send_webhook_post(health_data_t* data)
+{
+    if (https_manager_is_busy()) {
+        printf("HTTPS busy, skipping\n");
+        return;
+    }
+
+    webhook_in_progress = true;
+
+    // Prepare POST data
+    https_post_data_t post_data = {
+        .sample = json_processor_get_sample_count(),
+        .timestamp = to_ms_since_boot(get_absolute_time()),
+        .device = "Pico-W",
+        .cpu = data->cpu,
+        .memory = data->memory,
+        .disk = data->disk,
+        .net_in = data->net_in,
+        .net_out = data->net_out,
+        .processes = data->processes
+    };
+
+    // Send POST request
+    bool success = https_manager_post_json(&post_data);
+    
+    if (success) {
+        printf("POST successful!\n");
+    } else {
+        printf("POST failed\n");
+    }
+
+    webhook_in_progress = false;
+}
+
+bool init_atecc_pk_context(void){
+    if (!g_atecc_pk_initialized){
+        mbedtls_pk_init(&g_atecc_pk_ctx);
+        int ret = mbedtls_pk_setup(&g_atecc_pk_ctx, mbedtls_pk_info_from_type(MBEDTLS_PK_ECKEY));      
+        if (ret !=0){
+            printf("❌ mbedtls_pk_setup failed: -0x%04x\n", -ret);
+            return false;
+        }
+        g_atecc_pk_initialized = true;
+
+        printf("⚠️  We need to manually hook the signing function atca wrapper\n");
+        debug_pk_context("After init", &g_atecc_pk_ctx);
+
+        // Test signing directly with correct signature
+        uint8_t test_hash[32] = {0};
+        uint8_t test_sig[64];
+        size_t sig_len = 0;
+        int test_ret = mbedtls_pk_sign(&g_atecc_pk_ctx, MBEDTLS_MD_SHA256, 
+                                    test_hash, 32, test_sig, sizeof(test_sig), &sig_len, NULL, NULL);
+        printf("Direct PK sign test returned: %d, sig_len: %zu\n", test_ret, sig_len);
+    }
+    return true;
 }
 
 
@@ -405,51 +398,27 @@ void debug_pk_context(const char* label, mbedtls_pk_context* pk) {
     printf("================\n");
 }
 
-
-
-
 // [------------------------------------------------------------------------- Core 1 - WiFi Handler -------------------------------------------------------------------------]
-
-bool init_wifi(void)
-{
-    /* Initialize WiFi manager */
-    if (!wifi_manager_init())
-    {
-        printf("WiFi Manager: Initialization failed!\n");
-        return false;
-    }
-    
-    /* Connect to WiFi network */
-    if (!wifi_manager_connect(WIFI_SSID, WIFI_PASSWORD, 30000))
-    {
-        printf("WiFi Manager: Connection failed!\n");
-        return false;
-    }
-    
-    /* Update legacy flag for compatibility */
-    wifi_fully_connected = wifi_manager_is_fully_connected();
-    
-    printf("*** WiFi Manager: FULLY CONNECTED ***\n");
-    return true;
-}
-
-void check_wifi_connection(void)
-{
-    wifi_status_t status = wifi_manager_check_status();
-    
-    /* Handle reconnection if needed */
-    const wifi_manager_state_t *state = wifi_manager_get_state();
-    if (status == WIFI_STATUS_DISCONNECTED && state->reconnect_pending)
-    {
-        wifi_manager_handle_reconnect();
-    }
-}
 
 void core1_entry(void)
 {
     sleep_ms(1000);
-    
-    while (true)
+
+    // Configure WiFi manager
+    wifi_config_t wifi_cfg = {
+        .ssid = WIFI_SSID,
+        .password = WIFI_PASSWORD,
+        .reconnect_delay_ms = WIFI_RECONNECT_DELAY_MS,
+        .connection_timeout_ms = 30000,
+        .led_pin = WIFI_LED_PIN  // GP6
+    };
+
+    // Initialize WiFi manager
+    bool wifi_init_success = false;
+    int attempt_count = 0;
+
+    // Keep trying to initialize and connect
+    while (!wifi_init_success)
     {
         int attempt_count = 0;
 
@@ -471,60 +440,72 @@ void core1_entry(void)
                 sleep_ms(WIFI_RECONNECT_DELAY_MS);
             }
 
-            if (!wifi_manager_init()) {
-                printf("Core 1: WiFi init FAILED\n");
-                attempt_count++;
-                continue; // Retry after delay
-            }
-
-            if (!wifi_manager_connect(WIFI_SSID, WIFI_PASSWORD, WIFI_CONNECT_TIMEOUT_MS)) {
-                printf("Core 1: WiFi connection FAILED\n");
-                attempt_count++;
-                continue; // Retry after deinit
-            }
-
-            // Wait for full connection on Core 1 before breaking the connection loop
-            uint32_t start_time = to_ms_since_boot(get_absolute_time());
-            const uint32_t max_wait = 10000; // 10 second timeout for DHCP
-            
-            while (wifi_manager_is_connected() && !wifi_manager_is_fully_connected())
-            {
-                wifi_manager_poll();
-                sleep_ms(100);
-                if (to_ms_since_boot(get_absolute_time()) - start_time > max_wait) {
-                    printf("Core 1: Timed out waiting for full IP connection (DHCP). Retrying...\n");
-                    break;
-                }
-            }
-            
-            if (!wifi_manager_is_fully_connected()) {
-                 attempt_count++;
-                 continue; // Restart the entire connection process
-            }
-
-            // Exit the inner connection loop
-            printf("Core 1: WiFi fully connected after %d attempts!\n", attempt_count + 1);
-            wifi_fully_connected = true; // Set flag to true as we are now fully connected
-            break; 
+        // Initialize WiFi manager
+        if (!wifi_manager_init(&wifi_cfg)) {
+            attempt_count++;
+            continue;
         }
 
-        while (wifi_manager_is_connected()) 
-        {
-            wifi_fully_connected = wifi_manager_is_fully_connected(); 
-            wifi_manager_check_status(); 
-            wifi_manager_poll();
-            
-            if (webhook_trigger && !webhook_in_progress)
-            {
-                webhook_trigger = false;
-                const health_data_t* health = json_processor_get_health_data();
-                if (health->valid) {
-                    health_data_t data_copy = *health;
-                    send_webhook_post(&data_copy);
-                }
+        // Attempt connection
+        wifi_init_success = wifi_manager_connect();
+        attempt_count++;
+        
+        if (!wifi_init_success) {
+            // Fast blink during failed attempt
+            for (int i = 0; i < 5; i++) {
+                gpio_put(WIFI_LED_PIN, 1);
+                sleep_ms(100);
+                gpio_put(WIFI_LED_PIN, 0);
+                sleep_ms(100);
             }
             
-            sleep_ms(50);
+            // Deinit before retry
+            wifi_manager_deinit();
+        }
+    }
+
+    printf("Core 1: WiFi connected after %d attempts!\n", attempt_count);
+    gpio_put(WIFI_LED_PIN, 1);  // SOLID ON when connected
+    
+    // Set flag for auto-HID trigger
+    wifi_fully_connected = true;
+
+    // Core 1 main loop
+    while (true)
+    {
+        wifi_manager_poll();
+        wifi_manager_task();
+        
+        wifi_fully_connected = wifi_manager_is_fully_connected();
+        
+        wifi_state_t state = wifi_manager_get_state();
+        if (state == WIFI_STATE_CONNECTED)
+        {
+            // Solid ON when connected
+            gpio_put(WIFI_LED_PIN, 1);
+        }
+        else if (state == WIFI_STATE_RECONNECTING)
+        {
+            // Slow blink while waiting to reconnect
+            uint32_t now = to_ms_since_boot(get_absolute_time());
+            gpio_put(WIFI_LED_PIN, ((now / 500) % 2) == 0);
+        }
+        else
+        {
+            // Fast blink during connection attempt
+            uint32_t now = to_ms_since_boot(get_absolute_time());
+            gpio_put(WIFI_LED_PIN, ((now / 100) % 2) == 0);
+        }
+        
+        // Handle webhook trigger
+        if (webhook_trigger && wifi_manager_is_connected() && !webhook_in_progress)
+        {
+            webhook_trigger = false;
+            const health_data_t* health = json_processor_get_health_data();
+            if (health->valid) {
+                health_data_t data_copy = *health;
+                send_webhook_post(&data_copy);
+            }
         }
         
         // Connection dropped, ensure flag is false before retrying
@@ -560,8 +541,6 @@ int main(void)
     gpio_pull_up(ATECC_BUTTON_PIN);
 
     // ATECC608B Initialization
-    printf("\n=== Initializing ATECC608B ===\n");
-    
     i2c_init(I2C_BUS_ID, I2C_BAUDRATE);
     gpio_set_function(I2C_SDA_PIN, GPIO_FUNC_I2C);
     gpio_set_function(I2C_SCL_PIN, GPIO_FUNC_I2C);
@@ -570,7 +549,7 @@ int main(void)
 
     ATCA_STATUS status = atcab_init(&cfg_atecc608_pico);
     if (status != ATCA_SUCCESS) {
-        printf("❌ CryptoAuthLib init failed: %d. Continuing without ATECC...\n", status);
+        printf("❌ CryptoAuthLib init failed: %d, Continuing without ATECC...\n", status);
     } else {
         if (atecc_is_alive() == ATCA_SUCCESS) {
             printf("✅ ATECC608B communication verified\n");
@@ -611,40 +590,47 @@ int main(void)
     {
         printf("HID Manager initialization failed\n");
     }
-    // HID build the sequence once at startup
+
+    // Build the sequence once at startup
     hid_manager_build_sequence();
 
+    
+    https_config_t https_cfg = {
+        .hostname = WEBHOOK_HOSTNAME,
+        .webhook_token = WEBHOOK_TOKEN,
+        .port = 443,
+        
+        .ca_cert = CA_CERT,
+        .ca_cert_len = sizeof(CA_CERT),
+        
+    #ifdef MTLS_ENABLED
+        .enable_mtls = true,
+        .client_cert = CLIENT_CERT,
+        .client_cert_len = sizeof(CLIENT_CERT),
+        .atecc_pk_context = g_atecc_pk_initialized ? &g_atecc_pk_ctx : NULL,
+    #else
+        .enable_mtls = false,
+        .client_cert = NULL,
+        .client_cert_len = 0,
+        .atecc_pk_context = NULL,
+    #endif
+        
+        .dns_led_pin = DNS_LED_PIN,   // GP7
+        .mtls_led_pin = MTLS_LED_PIN, // GP8
+        
+        .operation_timeout_ms = DATA_TIMEOUT_MS
+    };
+    
+    if (!https_manager_init(&https_cfg)) {
+        printf("HTTPS Manager initialization failed\n");
+    }
 
     // Launch WiFi on Core 1
     multicore_launch_core1(core1_entry);
     sleep_ms(2000);
 
-    // Initialize HTTPS client
-    if (!https_client_init())
-    {
-        printf("HTTPS client initialization failed\n");
-    }
-    
-    // Configure HTTPS client with certificates
-    https_config_t https_cfg = {
-        .hostname = WEBHOOK_HOSTNAME,
-        .port = 443,
-        .ca_cert = (const uint8_t*)CA_CERT,
-        .ca_cert_len = sizeof(CA_CERT),
-    #ifdef MTLS_ENABLED
-        .client_cert = (const uint8_t*)CLIENT_CERT,
-        .client_cert_len = sizeof(CLIENT_CERT),
-        .enable_mtls = true,
-        .use_atecc = true,
-    #else
-        .client_cert = NULL,
-        .client_cert_len = 0,
-        .enable_mtls = false,
-        .use_atecc = false,
-    #endif
-    };
-    https_client_configure(&https_cfg);
 
+    
     // Initialize JSON Processor
     json_processor_config_t json_cfg = {
     #ifdef AUTO_POST_ON_SAMPLE
@@ -664,13 +650,13 @@ int main(void)
         printf("JSON Processor initialization failed\n");
     }
 
-
     // Core 0 main loop
     while (true)
     {
         tud_task();
         hid_manager_task(wifi_fully_connected, msc_manager_is_mounted());
         check_atecc_button();
+        https_manager_task();
 
         int c = getchar_timeout_us(0);
         if (c != PICO_ERROR_TIMEOUT)
