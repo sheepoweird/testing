@@ -6,6 +6,7 @@
 #include <bsp/board.h>
 #include <tusb.h>
 #include "hardware/gpio.h"
+#include "hid_config.h"
 
 #include "pico/cyw43_arch.h"
 #include "pico/multicore.h"
@@ -19,6 +20,7 @@
 #include "lwip/prot/iana.h"
 #include "lwip/dns.h"
 #include "mbedtls/ssl.h"
+#include "https_config.h"
 
 #include "hardware/i2c.h"
 #include "cryptoauthlib.h"
@@ -45,14 +47,13 @@
 #define DNS_LED_PIN 7
 #define MTLS_LED_PIN 8
 
+
 // ATECC Configuration
 #define ATECC_BUTTON_PIN 22
 #define I2C_BUS_ID      i2c0
 #define I2C_SDA_PIN     4
 #define I2C_SCL_PIN     5
 #define I2C_BAUDRATE    100000
-
-#define MBEDTLS_ECDSA_SIGN_ALT
 
 #define TARGET_SLOT 0
 #define ECC_PUB_KEY_SIZE    64
@@ -63,6 +64,7 @@
 #define MAX_SEQ 512
 
 #define DATA_TIMEOUT_MS 20000
+#define WIFI_RECONNECT_DELAY_MS 5000
 
 // MTLS CONFIGURATION
 #define MTLS_ENABLED
@@ -73,6 +75,7 @@
 
 // AUTO-HID TRIGGER CONFIGURATION
 #define AUTO_TRIGGER_HID
+
 
 // ATECC
 uint8_t g_public_key[ECC_PUB_KEY_SIZE] = {0};
@@ -103,8 +106,8 @@ static bool usb_mounted = false;
 static bool auto_trigger_executed = false;
 
 //mtls state
-bool g_atecc_pk_initialized = false;
-mbedtls_pk_context g_atecc_pk_ctx;
+static bool g_atecc_pk_initialized = false;
+static mbedtls_pk_context g_atecc_pk_ctx;
 bool init_atecc_pk_context(void);
 
 // [------------------------------------------------------------------------- ATECC608B - Testing -------------------------------------------------------------------------]
@@ -234,33 +237,28 @@ int atca_mbedtls_ecdsa_sign(const mbedtls_mpi* data, mbedtls_mpi* r, mbedtls_mpi
     if (!msg || msg_len != 32 || !r || !s) {
         return MBEDTLS_ERR_ECP_BAD_INPUT_DATA;
     }
-    
-    /* Copy hash buffer */
-    uint8_t hash[32];
-    memcpy(hash, buf, 32);
-    
-    /* Call ATECC608B hardware to sign the hash */
+
+    printf("📝 ATECC hardware signing called (slot %d)\n", TARGET_SLOT);
+
     uint8_t signature[64];
-    status = atcab_sign(TARGET_SLOT, hash, signature);
-    
-    if (status != ATCA_SUCCESS) 
-    {
+    ATCA_STATUS status = atcab_sign(TARGET_SLOT, msg, signature);
+
+    if (status != ATCA_SUCCESS) {
         printf("❌ ATECC sign failed: 0x%02X\n", status);
         return MBEDTLS_ERR_PK_ALLOC_FAILED;
     }
-    
-    /* Convert ATECC signature (R||S format) to mbedTLS MPIs */
+
+    printf("✅ ATECC signature generated\n");
+
     int ret = mbedtls_mpi_read_binary(r, signature, 32);
-    if (ret != 0) 
-    {
-        printf("❌ Failed to read signature R component: -0x%04x\n", -ret);
+    if (ret != 0) {
+        printf("❌ Failed to read R: -0x%04x\n", -ret);
         return ret;
     }
-    
+
     ret = mbedtls_mpi_read_binary(s, signature + 32, 32);
-    if (ret != 0) 
-    {
-        printf("❌ Failed to read signature S component: -0x%04x\n", -ret);
+    if (ret != 0) {
+        printf("❌ Failed to read S: -0x%04x\n", -ret);
         return ret;
     }
     return ret;
@@ -420,25 +418,21 @@ void core1_entry(void)
     // Keep trying to initialize and connect
     while (!wifi_init_success)
     {
-        int attempt_count = 0;
-
-        if (wifi_manager_get_state()->is_initialized) {
-            printf("Core 1: Forcing de-init and delay...\n");
-            wifi_manager_deinit(); 
-            sleep_ms(WIFI_RECONNECT_DELAY_MS);
-        }
-        
-        while (true)
+        if (attempt_count > 0)
         {
-            if (attempt_count > 0)
-            {
-                printf("Core 1: Retry attempt %d in %d seconds...\n", 
-                        attempt_count + 1, 
-                        WIFI_RECONNECT_DELAY_MS / 1000);
-                
-                wifi_manager_deinit(); 
-                sleep_ms(WIFI_RECONNECT_DELAY_MS);
+            printf("Core 1: Retry attempt %d in %d seconds...\n", 
+                   attempt_count + 1, 
+                   WIFI_RECONNECT_DELAY_MS / 1000);
+            
+            // Blink LED during wait period
+            int blink_cycles = WIFI_RECONNECT_DELAY_MS / 500;
+            for (int i = 0; i < blink_cycles; i++) {
+                gpio_put(WIFI_LED_PIN, 1);
+                sleep_ms(250);
+                gpio_put(WIFI_LED_PIN, 0);
+                sleep_ms(250);
             }
+        }
 
         // Initialize WiFi manager
         if (!wifi_manager_init(&wifi_cfg)) {
@@ -508,9 +502,7 @@ void core1_entry(void)
             }
         }
         
-        // Connection dropped, ensure flag is false before retrying
-        wifi_fully_connected = false;
-        printf("Core 1: WiFi connection lost. Retrying...\n");
+        sleep_ms(50);
     }
 }
 
@@ -527,6 +519,10 @@ int main(void)
     gpio_init(HID_BUTTON_PIN);
     gpio_set_dir(HID_BUTTON_PIN, GPIO_IN);
     gpio_pull_up(HID_BUTTON_PIN);
+
+    gpio_init(WIFI_LED_PIN);
+    gpio_set_dir(WIFI_LED_PIN, GPIO_OUT);
+    gpio_put(WIFI_LED_PIN, 0);
 
     gpio_init(DNS_LED_PIN);
     gpio_set_dir(DNS_LED_PIN, GPIO_OUT);
@@ -546,11 +542,14 @@ int main(void)
     gpio_set_function(I2C_SCL_PIN, GPIO_FUNC_I2C);
     gpio_pull_up(I2C_SDA_PIN);
     gpio_pull_up(I2C_SCL_PIN);
+    printf("✅ I2C Initialized at %dkHz\n", I2C_BAUDRATE / 1000);
 
     ATCA_STATUS status = atcab_init(&cfg_atecc608_pico);
     if (status != ATCA_SUCCESS) {
         printf("❌ CryptoAuthLib init failed: %d, Continuing without ATECC...\n", status);
     } else {
+        printf("✅ ATECC608B initialized successfully\n");
+        
         if (atecc_is_alive() == ATCA_SUCCESS) {
             printf("✅ ATECC608B communication verified\n");
             if (!init_atecc_pk_context()){
