@@ -6,7 +6,6 @@
 
 #define HID_MAX_SEQUENCE_LENGTH     512U    /**< Maximum keyboard sequence length */
 #define HID_UPDATE_INTERVAL_MS      20U     /**< HID update interval */
-#define HID_BUTTON_DEBOUNCE_MS      200U    /**< Button debounce time */
 #define HID_AUTO_TRIGGER_DELAY_MS   20000U  /**< Auto-trigger delay (20 seconds) */
 
 typedef struct
@@ -37,8 +36,6 @@ typedef struct
 typedef struct
 {
     bool enable_auto_trigger;   /**< Enable auto-trigger on WiFi+USB ready */
-    bool enable_manual_trigger; /**< Enable manual button trigger */
-    uint8_t trigger_button_pin; /**< GPIO pin for manual trigger */
     uint32_t auto_trigger_delay_ms; /**< Auto-trigger delay in milliseconds */
 } hid_config_t;
 

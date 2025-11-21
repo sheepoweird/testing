@@ -42,14 +42,12 @@
 
 #define MBEDTLS_ECDSA_SIGN_ALT
 
-#define HID_BUTTON_PIN 20
 #define WIFI_LED_PIN 6
 #define DNS_LED_PIN 7
 #define MTLS_LED_PIN 8
 
 
 // ATECC Configuration
-#define ATECC_BUTTON_PIN 22
 #define I2C_BUS_ID      i2c0
 #define I2C_SDA_PIN     4
 #define I2C_SCL_PIN     5
@@ -58,10 +56,6 @@
 #define TARGET_SLOT 0
 #define ECC_PUB_KEY_SIZE    64
 #define ECC_SIGNATURE_SIZE  64
-#define DIGEST_SIZE         32
-#define RNG_SIZE           32
-
-#define MAX_SEQ 512
 
 #define DATA_TIMEOUT_MS 20000
 #define WIFI_RECONNECT_DELAY_MS 5000
@@ -105,140 +99,21 @@ static volatile bool wifi_fully_connected = false;
 static bool usb_mounted = false;
 static bool auto_trigger_executed = false;
 
-//mtls state
+// mTLS state
 static bool g_atecc_pk_initialized = false;
 static mbedtls_pk_context g_atecc_pk_ctx;
 bool init_atecc_pk_context(void);
-
-// [------------------------------------------------------------------------- ATECC608B - Testing -------------------------------------------------------------------------]
-
-void print_hex(const uint8_t *data, size_t len) {
-    for (size_t i = 0; i < len; i++) {
-        printf("%02X", data[i]);
-    }
-}
-
-ATCA_STATUS atecc_is_alive() {
-    uint8_t rev_id[4];
-    return atcab_info(rev_id);
-}
-
-void atecc_extract_pubkey() {
-    ATCA_STATUS status;
-
-    printf("\n======================================================\n");
-    printf("=== ATECC PUBLIC KEY EXTRACTION (GP22) ===\n");
-    printf("======================================================\n");
-
-    if (atecc_is_alive() != ATCA_SUCCESS) {
-        printf("❌ HARDWARE ERROR: ATECC608B is unresponsive.\n");
-        return;
-    }
-
-    printf("Extracting Public Key from Slot %d...\n", TARGET_SLOT);
-    status = atcab_get_pubkey(TARGET_SLOT, g_public_key);
-
-    if (status != ATCA_SUCCESS) {
-        printf("❌ FAILED: Could not read public key. Status: %d\n", status);
-        return;
-    }
-
-    printf("✅ SUCCESS: Public Key extracted:\n");
-    printf("\"PUBLIC_KEY\": \"");
-    print_hex(g_public_key, ECC_PUB_KEY_SIZE);
-    printf("\"\n");
-    printf("======================================================\n");
-}
-
-void hardware_rng_test() {
-    ATCA_STATUS status;
-    uint8_t random_data[RNG_SIZE];
-
-    printf("\n======================================================\n");
-    printf("=== HARDWARE RNG TEST ===\n");
-    printf("======================================================\n");
-
-    if (atecc_is_alive() != ATCA_SUCCESS) {
-        printf("❌ HARDWARE ERROR: ATECC608B is unresponsive.\n");
-        return;
-    }
-
-    memset(random_data, 0, RNG_SIZE);
-    status = atcab_random(random_data);
-
-    if (status != ATCA_SUCCESS) {
-        printf("❌ FAILED: atcab_random failed! Status: 0x%02X\n", status);
-    } else {
-        printf("✅ SUCCESS: 32-byte Hardware Random Number:\n");
-        printf("\"RANDOM_DATA\": \"");
-        print_hex(random_data, RNG_SIZE);
-        printf("\"\n");
-    }
-
-    printf("======================================================\n");
-}
-
-void check_atecc_button(void)
-{
-    static bool last_button_state = true;
-    static uint32_t debounce_time = 0;
-
-    bool current_state = gpio_get(ATECC_BUTTON_PIN);
-    uint32_t now = to_ms_since_boot(get_absolute_time());
-
-    if (!current_state && last_button_state)
-    {
-        if (now - debounce_time > 200)
-        {
-            printf("\n>>> GP22 Button Pressed! <<<\n");
-            atecc_extract_pubkey();
-            const health_data_t* health = json_processor_get_health_data();
-            if (!health->valid) {
-                printf("❌ No health data available — generating test data\n");
-                json_processor_generate_test_data();
-            }
-            debounce_time = now;
-        }
-    }
-
-    last_button_state = current_state;
-}
-static void mbedtls_debug( void *ctx, int level, const char *file, int line, const char *str){
-    ((void) ctx);
-    ((void) level);
-    printf("%s:%04d: %s", file, line, str);
-}
-
-///To DELETE
-void my_debug(void *ctx, int level, const char *file, int line, const char *str)
-{
-    printf("[mbedTLS] %s:%d: %s\n", file, line, str);
-}
-
-int atecc_pk_sign_wrapper(void *ctx,
-                          mbedtls_md_type_t md_alg,
-                          const unsigned char *hash,
-                          size_t hash_len,
-                          unsigned char *sig,
-                          size_t sig_size,
-                          size_t *sig_len_out,
-                          int (*f_rng)(void *, unsigned char *, size_t),
-                          void *p_rng);
-
-
 
 // [------------------------------------------------------------------------- ATECC608B - Signing -------------------------------------------------------------------------]
 
 int atca_mbedtls_ecdsa_sign(const mbedtls_mpi* data, mbedtls_mpi* r, mbedtls_mpi* s,
                             const unsigned char* msg, size_t msg_len)
 {
-    (void)data;  // Unused — ATECC uses slot instead
+    (void)data;
 
     if (!msg || msg_len != 32 || !r || !s) {
         return MBEDTLS_ERR_ECP_BAD_INPUT_DATA;
     }
-
-    printf("📝 ATECC hardware signing called (slot %d)\n", TARGET_SLOT);
 
     uint8_t signature[64];
     ATCA_STATUS status = atcab_sign(TARGET_SLOT, msg, signature);
@@ -248,19 +123,12 @@ int atca_mbedtls_ecdsa_sign(const mbedtls_mpi* data, mbedtls_mpi* r, mbedtls_mpi
         return MBEDTLS_ERR_PK_ALLOC_FAILED;
     }
 
-    printf("✅ ATECC signature generated\n");
-
     int ret = mbedtls_mpi_read_binary(r, signature, 32);
     if (ret != 0) {
-        printf("❌ Failed to read R: -0x%04x\n", -ret);
         return ret;
     }
 
     ret = mbedtls_mpi_read_binary(s, signature + 32, 32);
-    if (ret != 0) {
-        printf("❌ Failed to read S: -0x%04x\n", -ret);
-        return ret;
-    }
     return ret;
 }
 
@@ -272,43 +140,33 @@ int mbedtls_ecdsa_sign(mbedtls_ecp_group *grp,
                         size_t blen,
                         int (*f_rng)(void *, unsigned char *, size_t), 
                         void *p_rng) {
-        fflush(stdout);
-        ATCA_STATUS status;
-        printf("🚨🚨🚨 MBEDTLS_ECDSA_SIGN CALLED! 🚨🚨🚨\n");
-        printf("bettter be called");
-        printf("Buffer length: %zu\n", blen);
-        
-        // Convert the MPI hash to a 32-byte buffer for ATECC
-        uint8_t hash[32];
-        status = atcab_random(hash);///hello
-        if (blen != 32) {
+    ATCA_STATUS status;
+    
+    uint8_t hash[32];
+    status = atcab_random(hash);
+    if (blen != 32) {
             printf("❌ Expected 32-byte hash, got %zu\n", blen);
-            return MBEDTLS_ERR_ECP_BAD_INPUT_DATA;
-        }
-        memcpy(hash, buf, 32);
-        
-        // Call ATECC hardware to sign
-        uint8_t signature[64];
-        status = atcab_sign(TARGET_SLOT, hash, signature);
-        
-        if (status != ATCA_SUCCESS) {
+        return MBEDTLS_ERR_ECP_BAD_INPUT_DATA;
+    }
+    memcpy(hash, buf, 32);
+    
+    uint8_t signature[64];
+    status = atcab_sign(TARGET_SLOT, hash, signature);
+    
+    if (status != ATCA_SUCCESS) {
             printf("❌ ATECC sign failed: 0x%02X\n", status);
-        }
-        
-        // Convert ATECC signature (R||S) to mbedTLS MPIs
-        int ret = mbedtls_mpi_read_binary(r, signature, 32);
-        if (ret != 0) {
-            printf("❌ Failed to read R: -0x%04x\n", -ret);
-            return ret;
-        }
-        
-        ret = mbedtls_mpi_read_binary(s, signature + 32, 32);
-        if (ret != 0) {
-            printf("❌ Failed to read S: -0x%04x\n", -ret);
-            return ret;
-        }
-        
-    printf("✅ ATECC signature successful!\n");
+    }
+    
+    int ret = mbedtls_mpi_read_binary(r, signature, 32);
+    if (ret != 0) {
+        return ret;
+    }
+    
+    ret = mbedtls_mpi_read_binary(s, signature + 32, 32);
+    if (ret != 0) {
+        return ret;
+    }
+    
     return 0;
 }
 
@@ -316,9 +174,8 @@ int mbedtls_ecdsa_sign(mbedtls_ecp_group *grp,
 
 void trigger_webhook_post(health_data_t* data)
 {
-    (void)data;  // Unused - data is fetched later in Core 1
+    (void)data;
     
-    // Set flag for Core 1 to pick up
     if (!webhook_in_progress) {
         webhook_trigger = true;
     }
@@ -327,13 +184,11 @@ void trigger_webhook_post(health_data_t* data)
 void send_webhook_post(health_data_t* data)
 {
     if (https_manager_is_busy()) {
-        printf("HTTPS busy, skipping\n");
         return;
     }
 
     webhook_in_progress = true;
 
-    // Prepare POST data
     https_post_data_t post_data = {
         .sample = json_processor_get_sample_count(),
         .timestamp = to_ms_since_boot(get_absolute_time()),
@@ -346,14 +201,7 @@ void send_webhook_post(health_data_t* data)
         .processes = data->processes
     };
 
-    // Send POST request
-    bool success = https_manager_post_json(&post_data);
-    
-    if (success) {
-        printf("POST successful!\n");
-    } else {
-        printf("POST failed\n");
-    }
+    https_manager_post_json(&post_data);
 
     webhook_in_progress = false;
 }
@@ -367,33 +215,8 @@ bool init_atecc_pk_context(void){
             return false;
         }
         g_atecc_pk_initialized = true;
-
-        printf("⚠️  We need to manually hook the signing function atca wrapper\n");
-        debug_pk_context("After init", &g_atecc_pk_ctx);
-
-        // Test signing directly with correct signature
-        uint8_t test_hash[32] = {0};
-        uint8_t test_sig[64];
-        size_t sig_len = 0;
-        int test_ret = mbedtls_pk_sign(&g_atecc_pk_ctx, MBEDTLS_MD_SHA256, 
-                                    test_hash, 32, test_sig, sizeof(test_sig), &sig_len, NULL, NULL);
-        printf("Direct PK sign test returned: %d, sig_len: %zu\n", test_ret, sig_len);
     }
     return true;
-}
-
-
-void debug_pk_context(const char* label, mbedtls_pk_context* pk) {
-    printf("=== %s ===\n", label);
-    printf("PK type: %d\n", mbedtls_pk_get_type(pk));
-    printf("PK name: %s\n", mbedtls_pk_get_name(pk));
-    
-    if (mbedtls_pk_get_type(pk) == MBEDTLS_PK_ECKEY) {
-        mbedtls_ecp_keypair* ecp = mbedtls_pk_ec(*pk);
-        printf("ECP items(?) %d\n", ecp);
-        printf("items %p\n",ecp);
-    }
-    printf("================\n");
 }
 
 // [------------------------------------------------------------------------- Core 1 - WiFi Handler -------------------------------------------------------------------------]
@@ -402,20 +225,17 @@ void core1_entry(void)
 {
     sleep_ms(1000);
 
-    // Configure WiFi manager
     wifi_config_t wifi_cfg = {
         .ssid = WIFI_SSID,
         .password = WIFI_PASSWORD,
         .reconnect_delay_ms = WIFI_RECONNECT_DELAY_MS,
         .connection_timeout_ms = 30000,
-        .led_pin = WIFI_LED_PIN  // GP6
+        .led_pin = WIFI_LED_PIN
     };
 
-    // Initialize WiFi manager
     bool wifi_init_success = false;
     int attempt_count = 0;
 
-    // Keep trying to initialize and connect
     while (!wifi_init_success)
     {
         if (attempt_count > 0)
@@ -424,7 +244,6 @@ void core1_entry(void)
                    attempt_count + 1, 
                    WIFI_RECONNECT_DELAY_MS / 1000);
             
-            // Blink LED during wait period
             int blink_cycles = WIFI_RECONNECT_DELAY_MS / 500;
             for (int i = 0; i < blink_cycles; i++) {
                 gpio_put(WIFI_LED_PIN, 1);
@@ -434,18 +253,15 @@ void core1_entry(void)
             }
         }
 
-        // Initialize WiFi manager
         if (!wifi_manager_init(&wifi_cfg)) {
             attempt_count++;
             continue;
         }
 
-        // Attempt connection
         wifi_init_success = wifi_manager_connect();
         attempt_count++;
         
         if (!wifi_init_success) {
-            // Fast blink during failed attempt
             for (int i = 0; i < 5; i++) {
                 gpio_put(WIFI_LED_PIN, 1);
                 sleep_ms(100);
@@ -453,15 +269,13 @@ void core1_entry(void)
                 sleep_ms(100);
             }
             
-            // Deinit before retry
             wifi_manager_deinit();
         }
     }
 
     printf("Core 1: WiFi connected after %d attempts!\n", attempt_count);
-    gpio_put(WIFI_LED_PIN, 1);  // SOLID ON when connected
+    gpio_put(WIFI_LED_PIN, 1);
     
-    // Set flag for auto-HID trigger
     wifi_fully_connected = true;
 
     // Core 1 main loop
@@ -516,10 +330,6 @@ int main(void)
     tud_init(BOARD_TUD_RHPORT);
 
     // Initialize GPIOs
-    gpio_init(HID_BUTTON_PIN);
-    gpio_set_dir(HID_BUTTON_PIN, GPIO_IN);
-    gpio_pull_up(HID_BUTTON_PIN);
-
     gpio_init(WIFI_LED_PIN);
     gpio_set_dir(WIFI_LED_PIN, GPIO_OUT);
     gpio_put(WIFI_LED_PIN, 0);
@@ -531,10 +341,6 @@ int main(void)
     gpio_init(MTLS_LED_PIN);
     gpio_set_dir(MTLS_LED_PIN, GPIO_OUT);
     gpio_put(MTLS_LED_PIN, 0);
-    
-    gpio_init(ATECC_BUTTON_PIN);
-    gpio_set_dir(ATECC_BUTTON_PIN, GPIO_IN);
-    gpio_pull_up(ATECC_BUTTON_PIN);
 
     // ATECC608B Initialization
     i2c_init(I2C_BUS_ID, I2C_BAUDRATE);
@@ -542,58 +348,35 @@ int main(void)
     gpio_set_function(I2C_SCL_PIN, GPIO_FUNC_I2C);
     gpio_pull_up(I2C_SDA_PIN);
     gpio_pull_up(I2C_SCL_PIN);
-    printf("✅ I2C Initialized at %dkHz\n", I2C_BAUDRATE / 1000);
 
     ATCA_STATUS status = atcab_init(&cfg_atecc608_pico);
     if (status != ATCA_SUCCESS) {
-        printf("❌ CryptoAuthLib init failed: %d, Continuing without ATECC...\n", status);
+        printf("CryptoAuthLib init failed: %d\n", status);
     } else {
-        printf("✅ ATECC608B initialized successfully\n");
+        printf("ATECC608B initialized\n");
         
-        if (atecc_is_alive() == ATCA_SUCCESS) {
-            printf("✅ ATECC608B communication verified\n");
-            if (!init_atecc_pk_context()){
-                printf("atecc pk context initialization failed\n");
-            }else{
-                printf("atecc pk context initialized\n");
-            }
+        if (!init_atecc_pk_context()){
+            printf("ATECC PK context initialization failed\n");
         }
     }
 
-    // Initialize MSC Manager
     msc_config_t msc_cfg = {
         .enable_mount_callbacks = true,
-        .on_mount = NULL,    // Optional: set custom callback if needed
-        .on_unmount = NULL   // Optional: set custom callback if needed
+        .on_mount = NULL,
+        .on_unmount = NULL
     };
     
-    if (!msc_manager_init(&msc_cfg))
-    {
-        printf("MSC Manager initialization failed\n");
-    }
+    msc_manager_init(&msc_cfg);
 
-    // Initialize HID Manager
     hid_config_t hid_cfg = {
-    #ifdef AUTO_TRIGGER_HID
         .enable_auto_trigger = true,
-        .auto_trigger_delay_ms = 20000,  // 20 seconds
-    #else
-        .enable_auto_trigger = false,
-        .auto_trigger_delay_ms = 0,
-    #endif
-        .enable_manual_trigger = true,
-        .trigger_button_pin = HID_BUTTON_PIN  // GP20
+        .auto_trigger_delay_ms = 20000
     };
     
-    if (!hid_manager_init(&hid_cfg))
-    {
-        printf("HID Manager initialization failed\n");
-    }
+    hid_manager_init(&hid_cfg);
 
-    // Build the sequence once at startup
     hid_manager_build_sequence();
 
-    
     https_config_t https_cfg = {
         .hostname = WEBHOOK_HOSTNAME,
         .webhook_token = WEBHOOK_TOKEN,
@@ -613,22 +396,16 @@ int main(void)
         .client_cert_len = 0,
         .atecc_pk_context = NULL,
     #endif
-        
-        .dns_led_pin = DNS_LED_PIN,   // GP7
-        .mtls_led_pin = MTLS_LED_PIN, // GP8
-        
+        .dns_led_pin = DNS_LED_PIN,
+        .mtls_led_pin = MTLS_LED_PIN,
         .operation_timeout_ms = DATA_TIMEOUT_MS
     };
     
-    if (!https_manager_init(&https_cfg)) {
-        printf("HTTPS Manager initialization failed\n");
-    }
+    https_manager_init(&https_cfg);
 
     // Launch WiFi on Core 1
     multicore_launch_core1(core1_entry);
     sleep_ms(2000);
-
-
     
     // Initialize JSON Processor
     json_processor_config_t json_cfg = {
@@ -644,17 +421,13 @@ int main(void)
         .on_data_received = NULL
     };
 
-    if (!json_processor_init(&json_cfg))
-    {
-        printf("JSON Processor initialization failed\n");
-    }
+    json_processor_init(&json_cfg);
 
     // Core 0 main loop
     while (true)
     {
         tud_task();
         hid_manager_task(wifi_fully_connected, msc_manager_is_mounted());
-        check_atecc_button();
         https_manager_task();
 
         int c = getchar_timeout_us(0);
@@ -668,43 +441,3 @@ int main(void)
 
     return 0;
 }
-
-
-// TODO DO NOT REMOVE COMMENTS
-
-// Blinking Logic 
-// Off = Fail
-// Blinking = In process
-// On = Success
-
-// LED 6 WIFI Connection status ✅
-// LED 7 DNS Status ✅
-// LED 8 MTLS Status 
-
-
-
-// Sequence of operations
-
-// PICO Powers on -> WIFI/SD card runs simultaneously on boot
-// WHEN WIFI connects LED 6 Turns on else LED off
-// WHEN SD card initializes it appears on WINDOWS PC as a boot drive, if SD card not inserted add LED on 16
-
-// IF statement when WIFI && SD Card Initializes start 20sec countdown to open CMD (this is to give time for Windows to initialize) literally no way of checking on PICO until File explorer appears since no Serial connection.
-
-// Triggers HID to open CMD if Python EXE not exist it just exit cmd 
-
-// Python EXE opens (Takes awhile) Start CDC communication, IF fail exits CMD (usually cause COM PORT occupied)
-
-// EVERY 5 sec sends CDC json data to PICO (always work cause how do u fk up python) 
-
-// Pico receives data and starts POST request 
-
-// IF any steps fail it just retries with new incoming samples
-
-// 1. get DNS if successful LED 7 ON
-// 2. MTLS with website successful LED 8 ON
-// 3. POST request sent Successful LED 9 ON (if fail usually python shows the error (write error etc)
-
-// End of process
-
-// No ATEC806B yet (will appears between step 1 and 2 to get certs)
