@@ -33,8 +33,6 @@ bool json_processor_is_connected(void);
 
 uint32_t json_processor_get_time_since_last_data(void);
 
-void json_processor_generate_test_data(void);
-
 void json_processor_reset(void);
 
 #endif // JSON_PROCESSOR_H
