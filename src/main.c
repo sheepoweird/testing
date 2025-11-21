@@ -60,9 +60,6 @@
 #define DATA_TIMEOUT_MS 20000
 #define WIFI_RECONNECT_DELAY_MS 5000
 
-// MTLS CONFIGURATION
-#define MTLS_ENABLED
-
 // POST CONFIGURATION
 #define AUTO_POST_ON_SAMPLE
 #define MIN_POST_INTERVAL_MS 6000
@@ -92,12 +89,9 @@ ATCAIfaceCfg cfg_atecc608_pico = {
 // Inter-core communication
 static volatile bool webhook_trigger = false;
 static volatile bool webhook_in_progress = false;
-static uint32_t last_post_time = 0;
 
 // Auto-trigger variables
 static volatile bool wifi_fully_connected = false;
-static bool usb_mounted = false;
-static bool auto_trigger_executed = false;
 
 // mTLS state
 static bool g_atecc_pk_initialized = false;
@@ -140,6 +134,11 @@ int mbedtls_ecdsa_sign(mbedtls_ecp_group *grp,
                         size_t blen,
                         int (*f_rng)(void *, unsigned char *, size_t), 
                         void *p_rng) {
+    (void)grp;
+    (void)d;
+    (void)f_rng;
+    (void)p_rng;
+    
     ATCA_STATUS status;
     
     uint8_t hash[32];
@@ -382,20 +381,14 @@ int main(void)
         .webhook_token = WEBHOOK_TOKEN,
         .port = 443,
         
-        .ca_cert = CA_CERT,
+        .ca_cert = (const uint8_t*)CA_CERT,
         .ca_cert_len = sizeof(CA_CERT),
         
-    #ifdef MTLS_ENABLED
         .enable_mtls = true,
-        .client_cert = CLIENT_CERT,
+        .client_cert = (const uint8_t*)CLIENT_CERT,
         .client_cert_len = sizeof(CLIENT_CERT),
         .atecc_pk_context = g_atecc_pk_initialized ? &g_atecc_pk_ctx : NULL,
-    #else
-        .enable_mtls = false,
-        .client_cert = NULL,
-        .client_cert_len = 0,
-        .atecc_pk_context = NULL,
-    #endif
+        
         .dns_led_pin = DNS_LED_PIN,
         .mtls_led_pin = MTLS_LED_PIN,
         .operation_timeout_ms = DATA_TIMEOUT_MS
