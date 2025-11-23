@@ -1,14 +1,5 @@
 #include "hw_config.h"
 
-/* SD card via SPI (Maker Pi Pico onboard microSD slot)
-   Wiring (fixed on board):
-     GP10 -> SCK
-     GP11 -> MOSI (SDI)
-     GP12 -> MISO (SDO)
-     GP15 -> CSn
-   GP13, GP14 unused (set as pull-ups)
-*/
-
 static spi_t spi = {
     .hw_inst = spi1,  // GP10-15 are on SPI1 peripheral
     .miso_gpio = 12,  // GP12

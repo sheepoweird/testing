@@ -58,52 +58,20 @@ typedef struct {
     int processes;
 } https_post_data_t;
 
-/**
- * Initialize HTTPS manager with configuration
- * @param config HTTPS configuration structure
- * @return true if initialization successful, false otherwise
- */
 bool https_manager_init(const https_config_t* config);
 
-/**
- * Deinitialize HTTPS manager and cleanup resources
- */
 void https_manager_deinit(void);
 
-/**
- * Send POST request with JSON data
- * @param data Data to send in POST request
- * @return true if request initiated successfully, false otherwise
- */
 bool https_manager_post_json(const https_post_data_t* data);
 
-/**
- * Check if HTTPS manager is currently busy with an operation
- * @return true if busy, false if idle
- */
 bool https_manager_is_busy(void);
 
-/**
- * Get current HTTPS state
- * @return Current state
- */
 https_state_t https_manager_get_state(void);
 
-/**
- * Get number of bytes received in last operation
- * @return Bytes received
- */
 uint16_t https_manager_get_bytes_received(void);
 
-/**
- * Abort current operation and cleanup
- */
 void https_manager_abort(void);
 
-/**
- * Task function - handles timeouts and cleanup
- * Should be called periodically from main loop
- */
 void https_manager_task(void);
 
 #endif // HTTPS_MANAGER_H

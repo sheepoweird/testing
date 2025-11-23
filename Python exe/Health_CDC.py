@@ -15,7 +15,7 @@ class HealthMonitorPico:
         self.interval = interval
         self.running = False
         self.network_history = deque(maxlen=10)
-        self.pico_messages = deque(maxlen=20)  # Store Pico messages
+        self.pico_messages = deque(maxlen=30)  # Store Pico messages
         self.start_time = time.time()
         self.sample_count = 0
         self.serial_connection = None
@@ -285,9 +285,9 @@ class HealthMonitorPico:
         print("-" * 70)
         print(f"JSON: {json.dumps(data)[:65]}...")
 
-        # === PICO MESSAGE LOG SECTION (LAST 20 MESSAGES) ===
+        # === PICO MESSAGE LOG SECTION (LAST 30 MESSAGES) ===
         print("\n" + "=" * 70)
-        print("  PICO MESSAGES (Last 20)")
+        print("  PICO MESSAGES (Last 30)")
         print("=" * 70)
 
         if self.pico_messages:
@@ -383,8 +383,8 @@ class HealthMonitorPico:
         print("✓ Serial port closed")
 
 def main():
-    # Define default values as variables
-    default_interval = 20
+    # Define default values as variables    
+    default_interval = 40
     default_log_file = "health_monitor.txt"
 
     parser = argparse.ArgumentParser(description='PC Health Monitor with Pico CDC')

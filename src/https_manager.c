@@ -188,7 +188,6 @@ bool https_manager_post_json(const https_post_data_t* data)
     g_https_state.state = HTTPS_STATE_CONNECTING;
     
     if (g_https_state.config.enable_mtls && g_https_state.config.client_cert) {
-        printf("HTTPS Manager: Configuring mTLS...\n");
         g_https_state.tls_config = altcp_tls_create_config_client_2wayauth(
             g_https_state.config.ca_cert,
             g_https_state.config.ca_cert_len,
@@ -196,12 +195,6 @@ bool https_manager_post_json(const https_post_data_t* data)
             NULL, 0,
             g_https_state.config.client_cert,
             g_https_state.config.client_cert_len
-        );
-    } else {
-        printf("HTTPS Manager: Configuring TLS...\n");
-        g_https_state.tls_config = altcp_tls_create_config_client(
-            g_https_state.config.ca_cert,
-            g_https_state.config.ca_cert_len
         );
     }
 
@@ -327,7 +320,6 @@ bool https_manager_post_json(const https_post_data_t* data)
     }
 
     if (!g_https_state.connected) {
-        printf("HTTPS Manager: TLS handshake timeout\n");
         g_https_state.state = HTTPS_STATE_ERROR;
         update_leds();
         cleanup_connection();

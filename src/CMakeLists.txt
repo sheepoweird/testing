@@ -14,11 +14,12 @@ endif()
 # ====================================================================================
 cmake_minimum_required(VERSION 3.13...3.27)
 
-set(PICO_SDK_PATH "C:/Users/piers/pico-sdk")
+# Pico Version SDK 2.2.0
+set(PICO_SDK_PATH "C:/Users/piers/pico-sdk") 
 
 set(PICO_BOARD pico_w CACHE STRING "Board type")
 
-set(PROGRAM_NAME HID_MSC_CDC_LOG_WIFI_HTTPS)
+set(PROGRAM_NAME embedded_token)
 
 # Pull in Pico SDK (must be before project)
 include(pico_sdk_import.cmake)
